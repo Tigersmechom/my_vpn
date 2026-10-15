@@ -1,0 +1,448 @@
+#!/usr/bin/env bash
+# Управление My VPN: VLESS + REALITY/TCP, Hysteria 2 и AmneziaWG.
+#   vpnctl add <имя> [--no-render]  добавить клиента
+#   vpnctl remove <имя>            удалить клиента
+#   vpnctl list                    список клиентов
+#   vpnctl profile <имя>           JSON-профиль версии 2
+#   vpnctl links <имя>             ссылки VLESS/Hysteria 2 и конфиг AmneziaWG
+#   vpnctl export <имя> <каталог>   файлы для импорта в сторонние клиенты
+#   vpnctl render                  пересобрать и применить конфиги
+#   vpnctl migrate                 резервная копия, удаление старых протоколов, render
+#   vpnctl status                  состояние сервисов
+set -euo pipefail
+umask 077
+
+die() { echo "Ошибка: $*" >&2; exit 1; }
+ROOT="${MYVPN_ROOT:-}"
+if [[ -n $ROOT ]]; then
+  [[ $ROOT == /* && $ROOT != / && -d $ROOT && ! -L $ROOT ]] || die "MYVPN_ROOT должен быть отдельным абсолютным каталогом"
+  ROOT="$(cd "$ROOT" && pwd -P)"
+  [[ $ROOT != / ]] || die "MYVPN_ROOT не может быть /"
+  python3 - "$ROOT" <<'PY' || exit 1
+import os, stat, sys
+s = os.stat(sys.argv[1])
+if s.st_uid != os.geteuid() or stat.S_IMODE(s.st_mode) & 0o077:
+    sys.exit("MYVPN_ROOT должен принадлежать текущему пользователю и иметь права 700")
+PY
+else
+  [[ $EUID -eq 0 ]] || die "запустите от root"
+fi
+STATE_DIR="$ROOT/etc/myvpn"
+SERVER_ENV="$STATE_DIR/server.env"
+CLIENTS_DIR="$STATE_DIR/clients"
+XRAY_CONFIG="$ROOT/usr/local/etc/xray/config.json"
+AWG_CONFIG="$ROOT/etc/amnezia/amneziawg/awg0.conf"
+LEGACY_WG_CONFIG="$ROOT/etc/wireguard/wg0.conf"
+XRAY_BIN="$ROOT/usr/local/bin/xray"
+EXPORT_SCRIPT="$ROOT/usr/local/lib/myvpn/export.py"
+
+# State files contain only generated, literal assignments. Never execute arbitrary
+# shell syntax from them; also reject symlinks and group/world-accessible secrets.
+safe_source() {
+  python3 - "$1" "$2" <<'PY' || exit 1
+import os, re, stat, sys
+path, kind = sys.argv[1:]
+server = "PUBLIC_HOST WAN_IF REALITY_SNI REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY REALITY_SHORT_ID REALITY_FINGERPRINT VLESS_TCP_PORT AWG_PORT AWG_NET AWG_SERVER_PRIVATE_KEY AWG_SERVER_PUBLIC_KEY AWG_JC AWG_JMIN AWG_JMAX AWG_S1 AWG_S2 AWG_S3 AWG_S4 AWG_H1 AWG_H2 AWG_H3 AWG_H4 AWG_I1 CLIENT_DNS HY2_PORT HY2_OBFS_PORT HY2_SNI HY2_OBFS_PASSWORD HY2_CERT HY2_KEY HY2_PIN VLESS_XHTTP_PORT XHTTP_PATH WG_PORT WG_NET WG_SERVER_PRIVATE_KEY WG_SERVER_PUBLIC_KEY RELAY_HOST".split()
+client = "CLIENT_NAME CLIENT_INDEX VLESS_UUID AWG_PRIVATE_KEY AWG_PUBLIC_KEY AWG_PRESHARED_KEY HY2_AUTH WG_PRIVATE_KEY WG_PUBLIC_KEY WG_PRESHARED_KEY".split()
+allowed = set(server if kind == "server" else client)
+try:
+    s = os.lstat(path)
+    if not stat.S_ISREG(s.st_mode) or s.st_uid != os.geteuid() or stat.S_IMODE(s.st_mode) & 0o077:
+        raise ValueError("ожидается обычный файл владельца с правами 600")
+    seen = set()
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.rstrip("\n")
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            m = re.fullmatch(r"([A-Z][A-Z0-9_]*)=(?:'([^'\r\n]*)'|([0-9]+))", line)
+            if not m or m[1] not in allowed or m[1] in seen:
+                raise ValueError("недопустимая или повторная переменная; допустимы только литералы")
+            seen.add(m[1])
+except (OSError, ValueError) as e:
+    sys.exit(f"Ошибка в {path}: {e}")
+PY
+  # shellcheck disable=SC1090
+  source "$1"
+}
+
+[[ -f $SERVER_ENV ]] || die "сервер не установлен, сначала install.sh"
+safe_source "$SERVER_ENV" server
+valid_name() { [[ ${1:-} =~ ^[a-zA-Z0-9_-]{1,32}$ ]] || die "имя клиента: латиница, цифры, - и _ (до 32 символов)"; }
+client_file() { printf '%s/%s.env\n' "$CLIENTS_DIR" "$1"; }
+
+validate_server() {
+  python3 - "$PUBLIC_HOST" "$REALITY_SNI" "$HY2_SNI" "$WAN_IF" "$AWG_NET" "$CLIENT_DNS" \
+    "$VLESS_TCP_PORT" "$AWG_PORT" "$HY2_PORT" "$HY2_OBFS_PORT" <<'PY' || exit 1
+import ipaddress, re, sys
+host, sni, hy_sni, interface, network, dns, *ports = sys.argv[1:]
+def hostname(value):
+    return len(value) <= 253 and all(re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", p) for p in value.split("."))
+try:
+    try: ipaddress.ip_address(host)
+    except ValueError:
+        if not hostname(host) or re.fullmatch(r"[0-9.]+", host): raise ValueError("некорректный PUBLIC_HOST")
+    if not hostname(sni) or not hostname(hy_sni): raise ValueError("некорректный SNI")
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,15}", interface): raise ValueError("некорректный WAN_IF")
+    ipaddress.IPv4Network(network + ".0/24")
+    if len(network.split(".")) != 3: raise ValueError("некорректный AWG_NET")
+    for address in dns.split(","): ipaddress.ip_address(address.strip())
+    if any(not re.fullmatch(r"[1-9][0-9]{0,4}", p) or int(p) > 65535 for p in ports): raise ValueError("порт должен быть 1–65535")
+    if len(set(ports[1:])) != 3: raise ValueError("UDP-порты AmneziaWG и Hysteria должны различаться")
+except ValueError as e: sys.exit("Ошибка настроек сервера: " + str(e))
+PY
+}
+
+load_client() {
+  valid_name "${1:-}"
+  local f; f="$(client_file "$1")"
+  [[ -f $f ]] || die "клиент '$1' не найден"
+  unset CLIENT_NAME CLIENT_INDEX VLESS_UUID AWG_PRIVATE_KEY AWG_PUBLIC_KEY AWG_PRESHARED_KEY HY2_AUTH WG_PRIVATE_KEY WG_PUBLIC_KEY WG_PRESHARED_KEY
+  safe_source "$f" client
+  [[ ${CLIENT_NAME:-} == "$1" ]] || die "имя клиента не совпадает с именем файла: $f"
+  [[ ${CLIENT_INDEX:-} =~ ^[1-9][0-9]{0,2}$ ]] && ((10#$CLIENT_INDEX >= 2 && 10#$CLIENT_INDEX <= 254)) || die "некорректный индекс клиента: $f"
+  [[ ${VLESS_UUID:-} =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || die "некорректный UUID: $f"
+  [[ -n ${AWG_PRIVATE_KEY:-} && -n ${AWG_PUBLIC_KEY:-} && -n ${AWG_PRESHARED_KEY:-} ]] || die "нет ключей AmneziaWG: $f"
+}
+
+next_index() {
+  local f i used=" "
+  for f in "$CLIENTS_DIR"/*.env; do
+    [[ -f $f ]] || continue
+    load_client "$(basename "$f" .env)"
+    used+="$CLIENT_INDEX "
+  done
+  for ((i = 2; i < 255; i++)); do
+    [[ $used == *" $i "* ]] || { echo "$i"; return; }
+  done
+  die "закончились адреса в подсети"
+}
+
+cmd_add() {
+  local name="${1:-}" render=1 index awg_priv f
+  valid_name "$name"
+  [[ $# -le 2 && ( $# -lt 2 || $2 == --no-render ) ]] || die "vpnctl add <имя> [--no-render]"
+  [[ ${2:-} == --no-render ]] && render=0
+  f="$(client_file "$name")"
+  [[ ! -e $f && ! -L $f ]] || die "клиент '$name' уже существует"
+  index="$(next_index)"
+  awg_priv="$(awg genkey)"
+  mkdir -p "$CLIENTS_DIR"
+  chmod 700 "$CLIENTS_DIR"
+  cat >"$f" <<EOF
+CLIENT_NAME='$name'
+CLIENT_INDEX=$index
+VLESS_UUID='$($XRAY_BIN uuid)'
+AWG_PRIVATE_KEY='$awg_priv'
+AWG_PUBLIC_KEY='$(awg pubkey <<<"$awg_priv")'
+AWG_PRESHARED_KEY='$(awg genpsk)'
+HY2_AUTH='$(openssl rand -hex 16)'
+EOF
+  echo "Клиент '$name' добавлен"
+  if ((render)); then cmd_render; fi
+}
+
+cmd_remove() {
+  valid_name "${1:-}"
+  [[ -f $(client_file "$1") && ! -L $(client_file "$1") ]] || die "клиент '$1' не найден"
+  rm -- "$(client_file "$1")"
+  echo "Клиент '$1' удалён"
+  cmd_render
+}
+
+cmd_list() {
+  local f
+  for f in "$CLIENTS_DIR"/*.env; do
+    [[ -f $f ]] || continue
+    (load_client "$(basename "$f" .env)"; printf '%-20s AWG %s.%s  %s\n' "$CLIENT_NAME" "$AWG_NET" "$CLIENT_INDEX" "$VLESS_UUID")
+  done
+}
+
+xray_clients_json() {
+  local f
+  for f in "$CLIENTS_DIR"/*.env; do
+    [[ -f $f ]] || continue
+    (load_client "$(basename "$f" .env)"; jq -n --arg id "$VLESS_UUID" --arg email "$CLIENT_NAME" '{id: $id, email: $email, flow: "xtls-rprx-vision"}')
+  done | jq -s .
+}
+
+hysteria_clients_json() {
+  local f
+  for f in "$CLIENTS_DIR"/*.env; do
+    [[ -f $f ]] || continue
+    (load_client "$(basename "$f" .env)"; jq -n --arg auth "${HY2_AUTH:?нет HY2_AUTH; выполните vpnctl render}" --arg email "$CLIENT_NAME" '{auth: $auth, email: $email}')
+  done | jq -s .
+}
+
+ensure_client_secrets() {
+  local f
+  for f in "$CLIENTS_DIR"/*.env; do
+    [[ -f $f ]] || continue
+    (load_client "$(basename "$f" .env)")
+    grep -q '^HY2_AUTH=' "$f" || printf "HY2_AUTH='%s'\n" "$(openssl rand -hex 16)" >>"$f"
+  done
+}
+
+render_xray() {
+  local reality next vision_clients hy_clients
+  mkdir -p "$(dirname "$XRAY_CONFIG")"
+  reality="$(jq -n --arg sni "$REALITY_SNI" --arg pk "$REALITY_PRIVATE_KEY" --arg sid "$REALITY_SHORT_ID" \
+    '{target: ($sni + ":443"), serverNames: [$sni], privateKey: $pk, shortIds: [$sid]}')"
+  vision_clients="$(xray_clients_json)" || die "не удалось прочитать клиентов VLESS"
+  hy_clients="$(hysteria_clients_json)" || die "не удалось прочитать клиентов Hysteria"
+  next="$(mktemp "${XRAY_CONFIG}.next.XXXXXX")"
+  jq -n \
+    --argjson tcpPort "$VLESS_TCP_PORT" --argjson reality "$reality" \
+    --argjson visionClients "$vision_clients" --argjson hyClients "$hy_clients" \
+    --argjson hyPort "$HY2_PORT" --argjson hyObfsPort "$HY2_OBFS_PORT" \
+    --arg hyCert "$HY2_CERT" --arg hyKey "$HY2_KEY" --arg obfs "$HY2_OBFS_PASSWORD" '
+  {
+    log: {loglevel: "warning"},
+    inbounds: [
+      {
+        tag: "vless-tcp", listen: "0.0.0.0", port: $tcpPort, protocol: "vless",
+        settings: {clients: $visionClients, decryption: "none"},
+        streamSettings: {network: "raw", security: "reality", realitySettings: $reality},
+        sniffing: {enabled: true, destOverride: ["http", "tls", "quic"], routeOnly: true}
+      },
+      {
+        tag: "hysteria2", listen: "0.0.0.0", port: $hyPort, protocol: "hysteria",
+        settings: {version: 2, clients: $hyClients},
+        streamSettings: {network: "hysteria", hysteriaSettings: {version: 2}, security: "tls",
+                         tlsSettings: {alpn: ["h3"], certificates: [{certificateFile: $hyCert, keyFile: $hyKey}]}},
+        sniffing: {enabled: true, destOverride: ["http", "tls", "quic"], routeOnly: true}
+      },
+      {
+        tag: "hysteria2-obfs", listen: "0.0.0.0", port: $hyObfsPort, protocol: "hysteria",
+        settings: {version: 2, clients: $hyClients},
+        streamSettings: {network: "hysteria", hysteriaSettings: {version: 2}, security: "tls",
+                         tlsSettings: {alpn: ["h3"], certificates: [{certificateFile: $hyCert, keyFile: $hyKey}]},
+                         finalmask: {udp: [{type: "salamander", settings: {password: $obfs}}]}},
+        sniffing: {enabled: true, destOverride: ["http", "tls", "quic"], routeOnly: true}
+      }
+    ],
+    outbounds: [{tag: "direct", protocol: "freedom"}, {tag: "block", protocol: "blackhole"}],
+    routing: {domainStrategy: "AsIs", rules: [
+      {type: "field", ip: ["geoip:private"], outboundTag: "block"},
+      {type: "field", protocol: ["bittorrent"], outboundTag: "block"}
+    ]}
+  }' >"$next"
+  if ! "$XRAY_BIN" run -test -format json -c "$next" >/dev/null; then
+    rm -f -- "$next"
+    die "Xray отверг новый конфиг; действующий файл сохранён"
+  fi
+  # Xray-install runs Xray as nobody; only its group may read server secrets.
+  if [[ -z $ROOT ]]; then chown root:nogroup "$next"; chmod 640 "$next"; fi
+  mv -- "$next" "$XRAY_CONFIG"
+}
+
+nat_rules() {
+  printf 'iptables -t nat -%s POSTROUTING -s %s.0/24 -o %s -j MASQUERADE; iptables -%s FORWARD -i %%i -j ACCEPT; iptables -%s FORWARD -o %%i -j ACCEPT; iptables -t mangle -%s FORWARD -i %%i -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu' "$1" "$2" "$WAN_IF" "$1" "$1" "$1"
+}
+
+render_awg() {
+  local f next
+  mkdir -p "$(dirname "$AWG_CONFIG")"
+  next="$(mktemp "${AWG_CONFIG}.next.XXXXXX")"
+  {
+    printf '[Interface]\nPrivateKey = %s\nAddress = %s.1/24\nListenPort = %s\n' "$AWG_SERVER_PRIVATE_KEY" "$AWG_NET" "$AWG_PORT"
+    printf 'Jc = %s\nJmin = %s\nJmax = %s\n' "$AWG_JC" "$AWG_JMIN" "$AWG_JMAX"
+    printf 'S1 = %s\nS2 = %s\nS3 = %s\nS4 = %s\n' "$AWG_S1" "$AWG_S2" "$AWG_S3" "$AWG_S4"
+    printf 'H1 = %s\nH2 = %s\nH3 = %s\nH4 = %s\n' "$AWG_H1" "$AWG_H2" "$AWG_H3" "$AWG_H4"
+    printf 'PostUp = %s\nPostDown = %s\n' "$(nat_rules A "$AWG_NET")" "$(nat_rules D "$AWG_NET")"
+    for f in "$CLIENTS_DIR"/*.env; do
+      [[ -f $f ]] || continue
+      (load_client "$(basename "$f" .env)"; printf '\n# %s\n[Peer]\nPublicKey = %s\nPresharedKey = %s\nAllowedIPs = %s.%s/32\n' "$CLIENT_NAME" "$AWG_PUBLIC_KEY" "$AWG_PRESHARED_KEY" "$AWG_NET" "$CLIENT_INDEX")
+    done
+  } >"$next"
+  mv -- "$next" "$AWG_CONFIG"
+}
+
+cmd_render() {
+  validate_server
+  ensure_client_secrets
+  render_xray
+  render_awg
+  systemctl enable -q xray
+  systemctl restart xray
+  if systemctl is-active -q awg-quick@awg0; then
+    awg syncconf awg0 <(awg-quick strip awg0)
+  else
+    systemctl enable -q --now awg-quick@awg0
+  fi
+  echo "Конфиги применены"
+}
+
+cmd_profile() {
+  validate_server
+  load_client "${1:-}"
+  jq -n \
+    --arg client "$CLIENT_NAME" --arg host "$PUBLIC_HOST" --arg dns "$CLIENT_DNS" \
+    --arg uuid "$VLESS_UUID" --arg sni "$REALITY_SNI" --arg pbk "$REALITY_PUBLIC_KEY" \
+    --arg sid "$REALITY_SHORT_ID" --arg fp "$REALITY_FINGERPRINT" --argjson tcpPort "$VLESS_TCP_PORT" \
+    --argjson awgPort "$AWG_PORT" --arg awgPriv "$AWG_PRIVATE_KEY" --arg awgAddr "$AWG_NET.$CLIENT_INDEX/32" \
+    --arg awgSrv "$AWG_SERVER_PUBLIC_KEY" --arg awgPsk "$AWG_PRESHARED_KEY" \
+    --argjson jc "$AWG_JC" --argjson jmin "$AWG_JMIN" --argjson jmax "$AWG_JMAX" \
+    --argjson s1 "$AWG_S1" --argjson s2 "$AWG_S2" --argjson s3 "$AWG_S3" --argjson s4 "$AWG_S4" \
+    --arg h1 "$AWG_H1" --arg h2 "$AWG_H2" --arg h3 "$AWG_H3" --arg h4 "$AWG_H4" --arg i1 "$AWG_I1" \
+    --argjson hyPort "$HY2_PORT" --argjson hyObfsPort "$HY2_OBFS_PORT" --arg hyAuth "${HY2_AUTH:?выполните vpnctl render}" \
+    --arg hySni "$HY2_SNI" --arg hyPin "$HY2_PIN" --arg hyObfs "$HY2_OBFS_PASSWORD" '
+  {
+    version: 2, name: "My VPN", client: $client, host: $host, dns: $dns,
+    vless: {uuid: $uuid, sni: $sni, publicKey: $pbk, shortId: $sid, fingerprint: $fp, tcpPort: $tcpPort},
+    awg: {port: $awgPort, privateKey: $awgPriv, address: $awgAddr, mtu: 1280,
+          serverPublicKey: $awgSrv, presharedKey: $awgPsk,
+          jc: $jc, jmin: $jmin, jmax: $jmax, s1: $s1, s2: $s2, s3: $s3, s4: $s4,
+          h1: $h1, h2: $h2, h3: $h3, h4: $h4, i1: $i1},
+    hy2: {port: $hyPort, obfsPort: $hyObfsPort, auth: $hyAuth, sni: $hySni, pinSha256: $hyPin, obfsPassword: $hyObfs}
+  }'
+}
+
+urlencode() { jq -rn --arg s "$1" '$s | @uri'; }
+endpoint_host() { if [[ $PUBLIC_HOST == *:* ]]; then printf '[%s]' "$PUBLIC_HOST"; else printf '%s' "$PUBLIC_HOST"; fi; }
+cmd_links() {
+  validate_server
+  load_client "${1:-}"
+  local host common
+  host="$(endpoint_host)"
+  common="security=reality&sni=$(urlencode "$REALITY_SNI")&fp=$(urlencode "$REALITY_FINGERPRINT")&pbk=$(urlencode "$REALITY_PUBLIC_KEY")&sid=$(urlencode "$REALITY_SHORT_ID")"
+  printf '# VLESS + REALITY (TCP, Vision)\nvless://%s@%s:%s?type=tcp&encryption=none&flow=xtls-rprx-vision&%s#%s\n\n' "$(urlencode "$VLESS_UUID")" "$host" "$VLESS_TCP_PORT" "$common" "$(urlencode "myvpn-tcp-$CLIENT_NAME")"
+  # Self-signed certificate: chain verification is disabled only with an explicit pin.
+  [[ ${HY2_PIN:-} =~ ^[0-9a-fA-F]{64}$ ]] || die "некорректный SHA-256 отпечаток Hysteria 2"
+  common="sni=$(urlencode "$HY2_SNI")&alpn=h3&insecure=1&pinSHA256=$(urlencode "$HY2_PIN")"
+  printf '# Hysteria 2: ссылки для native-клиентов; для v2rayTun используйте vpnctl export\n# Hysteria 2 (QUIC, UDP)\nhysteria2://%s@%s:%s/?%s#%s\n\n' "$(urlencode "${HY2_AUTH:?выполните vpnctl render}")" "$host" "$HY2_PORT" "$common" "$(urlencode "myvpn-hy2-$CLIENT_NAME")"
+  printf '# Hysteria 2 + Salamander\nhysteria2://%s@%s:%s/?%s&obfs=salamander&obfs-password=%s#%s\n\n' "$(urlencode "$HY2_AUTH")" "$host" "$HY2_OBFS_PORT" "$common" "$(urlencode "$HY2_OBFS_PASSWORD")" "$(urlencode "myvpn-hy2obfs-$CLIENT_NAME")"
+  cat <<EOF
+# AmneziaWG (.conf; отдельный импорт в клиент с поддержкой AWG 2)
+[Interface]
+PrivateKey = $AWG_PRIVATE_KEY
+Address = $AWG_NET.$CLIENT_INDEX/32
+DNS = $CLIENT_DNS
+MTU = 1280
+Jc = $AWG_JC
+Jmin = $AWG_JMIN
+Jmax = $AWG_JMAX
+S1 = $AWG_S1
+S2 = $AWG_S2
+S3 = $AWG_S3
+S4 = $AWG_S4
+H1 = $AWG_H1
+H2 = $AWG_H2
+H3 = $AWG_H3
+H4 = $AWG_H4
+I1 = $AWG_I1
+
+[Peer]
+PublicKey = $AWG_SERVER_PUBLIC_KEY
+PresharedKey = $AWG_PRESHARED_KEY
+Endpoint = $host:$AWG_PORT
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25
+EOF
+}
+
+cmd_export() {
+  [[ $# -eq 2 ]] || die "vpnctl export <имя> <каталог>"
+  valid_name "$1"
+  [[ -f $EXPORT_SCRIPT ]] || die "нет $EXPORT_SCRIPT; обновите install.sh"
+  cmd_profile "$1" | python3 "$EXPORT_SCRIPT" --profile - --output "$2"
+}
+
+# An exact match protects unrelated wg0 installations. Unknown or modified configs
+# are left in place, including their service; the backup records that decision.
+legacy_wg_matches() {
+  [[ -f $LEGACY_WG_CONFIG && ! -L $LEGACY_WG_CONFIG && -n ${WG_SERVER_PRIVATE_KEY:-} && -n ${WG_NET:-} && -n ${WG_PORT:-} ]] || return 1
+  local f expected
+  expected="$(mktemp "$STATE_DIR/.legacy-wg.XXXXXX")"
+  {
+    printf '[Interface]\nPrivateKey = %s\nAddress = %s.1/24\nListenPort = %s\n' "$WG_SERVER_PRIVATE_KEY" "$WG_NET" "$WG_PORT"
+    printf 'PostUp = %s\nPostDown = %s\n' "$(nat_rules A "$WG_NET")" "$(nat_rules D "$WG_NET")"
+    for f in "$CLIENTS_DIR"/*.env; do
+      [[ -f $f ]] || continue
+      (load_client "$(basename "$f" .env)"; printf '\n# %s\n[Peer]\nPublicKey = %s\nPresharedKey = %s\nAllowedIPs = %s.%s/32\n' "$CLIENT_NAME" "${WG_PUBLIC_KEY:-}" "${WG_PRESHARED_KEY:-}" "$WG_NET" "$CLIENT_INDEX")
+    done
+  } >"$expected"
+  if cmp -s "$expected" "$LEGACY_WG_CONFIG"; then rm -- "$expected"; return 0; fi
+  rm -- "$expected"
+  return 1
+}
+
+cmd_migrate() {
+  local f needs=0 owned_wg=0 backup
+  grep -Eq '^(WG_[A-Z_]+|VLESS_XHTTP_PORT|XHTTP_PATH|RELAY_HOST)=' "$SERVER_ENV" && needs=1
+  for f in "$CLIENTS_DIR"/*.env; do
+    [[ -f $f ]] || continue
+    (load_client "$(basename "$f" .env)")
+    grep -q '^WG_' "$f" && needs=1
+  done
+  if [[ -f $XRAY_CONFIG ]] && jq -e '.inbounds[]? | select(.tag == "vless-xhttp")' "$XRAY_CONFIG" >/dev/null; then needs=1; fi
+  if ((needs)); then
+    legacy_wg_matches && owned_wg=1
+    backup="$STATE_DIR/backups/$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    mkdir -p "$backup/config"
+    chmod 700 "$STATE_DIR" "$STATE_DIR/backups" "$backup" "$backup/config"
+    cp -p "$SERVER_ENV" "$backup/server.env"
+    cp -R -p "$CLIENTS_DIR" "$backup/clients"
+    [[ ! -f $XRAY_CONFIG ]] || cp -p "$XRAY_CONFIG" "$backup/config/xray.json"
+    [[ ! -f $AWG_CONFIG ]] || cp -p "$AWG_CONFIG" "$backup/config/awg0.conf"
+    [[ ! -f $LEGACY_WG_CONFIG ]] || cp -p "$LEGACY_WG_CONFIG" "$backup/config/wg0.conf"
+    [[ ! -f ${HY2_CERT:-} ]] || cp -p "$HY2_CERT" "$backup/config/hy2.crt"
+    [[ ! -f ${HY2_KEY:-} ]] || cp -p "$HY2_KEY" "$backup/config/hy2.key"
+    {
+      printf 'Migration: profile v2\nState directory: %s\nXray config: %s\nAmneziaWG config: %s\nLegacy WireGuard config: %s\nOwned WireGuard: %s\n' "$STATE_DIR" "$XRAY_CONFIG" "$AWG_CONFIG" "$LEGACY_WG_CONFIG" "$owned_wg"
+      printf 'Hysteria certificate: %s\nHysteria key: %s\n' "${HY2_CERT:-}" "${HY2_KEY:-}"
+      printf 'WireGuard active before: %s\n' "$(systemctl is-active wg-quick@wg0 2>/dev/null || true)"
+      printf 'WireGuard enabled before: %s\n' "$(systemctl is-enabled wg-quick@wg0 2>/dev/null || true)"
+      printf 'Restore server.env, clients and config files to the paths above before restarting services.\nOnly restore/enable wg-quick@wg0 if Owned WireGuard is 1 and it was active/enabled before.\n'
+    } >"$backup/manifest.txt"
+    echo "Резервная копия: $backup"
+    # Validate the replacement config while old settings and backup still exist.
+    validate_server
+    ensure_client_secrets
+    render_xray
+    render_awg
+    if ((owned_wg)); then
+      systemctl disable --now wg-quick@wg0
+      rm -- "$LEGACY_WG_CONFIG"
+    elif [[ -f $LEGACY_WG_CONFIG ]]; then
+      echo "wg0 не совпадает с конфигом проекта: файл и сервис оставлены без изменений" >&2
+    fi
+    python3 - "$SERVER_ENV" "$CLIENTS_DIR" <<'PY'
+import os, pathlib, re, sys, tempfile
+server, clients = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+for path in [server, *sorted(clients.glob("*.env"))]:
+    obsolete = r"^(?:WG_[A-Z_]+|VLESS_XHTTP_PORT|XHTTP_PATH|RELAY_HOST)=" if path == server else r"^WG_"
+    text = "".join(line for line in path.read_text().splitlines(keepends=True) if not re.match(obsolete, line))
+    fd, temporary = tempfile.mkstemp(prefix=".migrate-", dir=path.parent)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.replace(temporary, path)
+PY
+    echo "Старые поля WireGuard, XHTTP и посредника удалены"
+  else
+    echo "Состояние уже соответствует версии 2"
+  fi
+  cmd_render
+}
+
+cmd_status() {
+  local s
+  for s in xray awg-quick@awg0; do printf '%-18s %s\n' "$s" "$(systemctl is-active "$s" 2>/dev/null || true)"; done
+  echo
+  ss -lntup | awk 'NR == 1 || /xray|amneziawg/'
+  echo
+  awg show awg0 2>/dev/null | grep -E 'peer|latest handshake|transfer' || true
+}
+
+case "${1:-}" in
+  add) shift; cmd_add "$@" ;;
+  remove) shift; cmd_remove "$@" ;;
+  list) cmd_list ;;
+  profile) shift; cmd_profile "$@" ;;
+  links) shift; cmd_links "$@" ;;
+  export) shift; cmd_export "$@" ;;
+  render) cmd_render ;;
+  migrate) cmd_migrate ;;
+  status) cmd_status ;;
+  *) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+esac

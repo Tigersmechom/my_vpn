@@ -1,0 +1,247 @@
+#!/bin/bash
+# Привилегированная часть My VPN для macOS. Устанавливается в /Library/PrivilegedHelperTools/myvpn
+# и запускается приложением через sudo без пароля (правило в /etc/sudoers.d/myvpn).
+#
+#   myvpn-helper version
+#   myvpn-helper start-xray <config.json>
+#   myvpn-helper start-awg <awg.conf> <адрес/маска> <mtu> <dns,dns> <ip сервера>
+#   myvpn-helper stop
+#   myvpn-helper status
+#
+# Совместим с системным bash 3.2.
+set -euo pipefail
+umask 077
+
+VERSION=5
+DIR=/Library/PrivilegedHelperTools/myvpn
+RUN=/var/run/myvpn
+LOG=/var/log/myvpn.log
+XRAY_TUN=utun199
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+die() { echo "Ошибка: $*" >&2; exit 1; }
+
+DNS_RE='^[0-9a-fA-F.: ]*$'
+clean_dns() {
+  local d="${1//,/ }"
+  [[ $d =~ $DNS_RE ]] || die "неверные DNS: $1"
+  echo "${d:-1.1.1.1 8.8.8.8}"
+}
+log() { echo "$(date '+%F %T') $*" >>"$LOG"; }
+
+[[ $EUID -eq 0 ]] || die "нужны права root"
+mkdir -p "$RUN"
+chmod 700 "$RUN"
+
+# ---------- DNS ----------
+# На время подключения ставим публичные DNS всем сетевым службам: иначе запросы пойдут
+# к роутеру/провайдеру мимо туннеля (и провайдер в РФ подменяет ответы для заблокированных сайтов).
+
+network_services() {
+  networksetup -listallnetworkservices | tail -n +2 | grep -v '^\*' || true
+}
+
+dns_set() {
+  local servers="$1" svc
+  [[ -f $RUN/dns.backup ]] || {
+    network_services | while IFS= read -r svc; do
+      local cur
+      cur="$(networksetup -getdnsservers "$svc" 2>/dev/null | tr '\n' ' ')"
+      [[ $cur == *"aren't any"* ]] && cur="Empty"
+      printf '%s\t%s\n' "$svc" "$cur"
+    done >"$RUN/dns.backup"
+  }
+  network_services | while IFS= read -r svc; do
+    # shellcheck disable=SC2086
+    networksetup -setdnsservers "$svc" $servers 2>/dev/null || true
+  done
+  dns_flush
+}
+
+dns_restore() {
+  [[ -f $RUN/dns.backup ]] || return 0
+  local svc cur
+  while IFS=$'\t' read -r svc cur; do
+    # shellcheck disable=SC2086
+    networksetup -setdnsservers "$svc" $cur 2>/dev/null || true
+  done <"$RUN/dns.backup"
+  rm -f "$RUN/dns.backup"
+  dns_flush
+}
+
+dns_flush() {
+  dscacheutil -flushcache 2>/dev/null || true
+  killall -HUP mDNSResponder 2>/dev/null || true
+}
+
+# ---------- IPv6 ----------
+# Туннель только IPv4 (у сервера нет IPv6). Чтобы IPv6 не ушёл мимо туннеля в сетях, где он есть,
+# на время подключения закрываем весь глобальный IPv6 reject-маршрутами: соединения сразу получают
+# отказ, и приложения переходят на IPv4. Локальные fe80::/ff02:: остаются (они специфичнее).
+
+IPV6_BLOCK="::/1 8000::/1"
+
+ipv6_block() {
+  local net
+  for net in $IPV6_BLOCK; do
+    route -q -n add -inet6 -net "$net" ::1 -reject >/dev/null 2>&1 || true
+  done
+  touch "$RUN/ipv6.blocked"
+}
+
+ipv6_unblock() {
+  [[ -f $RUN/ipv6.blocked ]] || return 0
+  local net
+  for net in $IPV6_BLOCK; do
+    route -q -n delete -inet6 -net "$net" >/dev/null 2>&1 || true
+  done
+  rm -f "$RUN/ipv6.blocked"
+}
+
+# ---------- остановка ----------
+
+stop_all() {
+  if [[ -f $RUN/xray.pid ]]; then
+    kill "$(cat "$RUN/xray.pid")" 2>/dev/null || true
+    rm -f "$RUN/xray.pid"
+  fi
+  if [[ -f $RUN/wg.iface ]]; then
+    local iface
+    iface="$(cat "$RUN/wg.iface")"
+    rm -f "/var/run/amneziawg/$iface.sock"
+    pkill -f "amneziawg-go $iface" 2>/dev/null || pkill -f "$DIR/amneziawg-go" 2>/dev/null || true
+    rm -f "$RUN/wg.iface"
+  fi
+  if [[ -f $RUN/endpoint.route ]]; then
+    route -q -n delete -inet "$(cat "$RUN/endpoint.route")" >/dev/null 2>&1 || true
+    rm -f "$RUN/endpoint.route"
+  fi
+  # дождаться, пока процессы освободят интерфейсы
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    pgrep -f "$DIR/(xray|amneziawg-go)" >/dev/null || break
+    sleep 0.2
+  done
+  pkill -9 -f "$DIR/xray run" 2>/dev/null || true
+  ipv6_unblock
+  dns_restore
+}
+
+# ---------- Xray ----------
+
+start_xray() {
+  local src="$1"
+  [[ -f $src ]] || die "нет файла конфига"
+  # plutil входит в macOS 13+; отдельная установка jq не нужна.
+  # Берём только outbounds/routing: путь к root-логу и TUN задаёт helper.
+  local outbounds routing
+  outbounds="$(/usr/bin/plutil -extract outbounds json -o - "$src")" || die "некорректные outbounds Xray"
+  routing="$(/usr/bin/plutil -extract routing json -o - "$src")" || die "некорректные routing Xray"
+  stop_all
+  cat >"$RUN/xray.json" <<EOF
+{
+  "log": {"loglevel": "warning"},
+  "inbounds": [{
+    "tag": "tun", "port": 0, "protocol": "tun",
+    "settings": {"name": "$XRAY_TUN", "mtu": 1500,
+                 "autoSystemRoutingTable": ["0.0.0.0/1", "128.0.0.0/1"]}
+  }],
+  "outbounds": $outbounds,
+  "routing": $routing
+}
+EOF
+  chmod 600 "$RUN/xray.json"
+
+  local dns
+  dns="$(clean_dns "${2:-}")"
+  log "start xray"
+  nohup "$DIR/xray" run -c "$RUN/xray.json" >>"$LOG" 2>&1 &
+  echo $! >"$RUN/xray.pid"
+
+  local i
+  for i in $(seq 1 25); do
+    if ! kill -0 "$(cat "$RUN/xray.pid")" 2>/dev/null; then
+      rm -f "$RUN/xray.pid"
+      die "Xray завершился, см. $LOG: $(tail -3 "$LOG" | tr '\n' ' ')"
+    fi
+    ifconfig "$XRAY_TUN" >/dev/null 2>&1 && break
+    sleep 0.2
+  done
+  ifconfig "$XRAY_TUN" >/dev/null 2>&1 || { stop_all; die "не поднялся интерфейс $XRAY_TUN"; }
+  ipv6_block
+  dns_set "$dns"
+  echo "ok xray $XRAY_TUN"
+}
+
+# ---------- AmneziaWG ----------
+
+start_awg() {
+  local conf="$1" addr="$2" mtu="$3" dns="$4" endpoint="$5"
+  [[ -f $conf ]] || die "нет файла конфига"
+  [[ $addr =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$ ]] || die "неверный адрес $addr"
+  [[ $mtu =~ ^[0-9]{3,4}$ ]] || die "неверный MTU $mtu"
+  [[ $endpoint =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || die "неверный IP сервера $endpoint"
+  dns="$(clean_dns "$dns")"
+  stop_all
+
+  # Только ключи протокола — без Address/DNS/MTU/PostUp и прочего из wg-quick.
+  grep -E -i '^[[:space:]]*(\[Interface\]|\[Peer\]|PrivateKey|ListenPort|Jc|Jmin|Jmax|S[1-4]|H[1-4]|I[1-5]|PublicKey|PresharedKey|Endpoint|AllowedIPs|PersistentKeepalive)([[:space:]]*=|[[:space:]]*$)' \
+    "$conf" >"$RUN/wg.conf"
+  chmod 600 "$RUN/wg.conf"
+
+  # Маршрут до сервера — через текущий шлюз, чтобы сами UDP-пакеты туннеля не ушли в туннель.
+  local gw gw_if
+  gw="$(route -n get default 2>/dev/null | awk '/gateway:/ {print $2}')"
+  gw_if="$(route -n get default 2>/dev/null | awk '/interface:/ {print $2}')"
+  [[ -n $gw || -n $gw_if ]] || die "нет маршрута по умолчанию (нет сети?)"
+
+  log "start awg $endpoint"
+  rm -f "$RUN/awg.name"
+  WG_TUN_NAME_FILE="$RUN/awg.name" "$DIR/amneziawg-go" utun >>"$LOG" 2>&1 || die "amneziawg-go не запустился, см. $LOG"
+  local iface="" i
+  for i in $(seq 1 25); do
+    [[ -s $RUN/awg.name ]] && iface="$(cat "$RUN/awg.name")" && break
+    sleep 0.2
+  done
+  [[ -n $iface ]] || die "amneziawg-go не создал интерфейс"
+  echo "$iface" >"$RUN/wg.iface"
+
+  "$DIR/awg" setconf "$iface" "$RUN/wg.conf" || { stop_all; die "awg setconf отверг конфиг"; }
+  ifconfig "$iface" inet "$addr" "${addr%%/*}" alias
+  ifconfig "$iface" mtu "$mtu" up
+
+  if [[ -n $gw ]]; then
+    route -q -n add -inet "$endpoint/32" "$gw" >/dev/null 2>&1 || true
+  else
+    route -q -n add -inet "$endpoint/32" -interface "$gw_if" >/dev/null 2>&1 || true
+  fi
+  echo "$endpoint/32" >"$RUN/endpoint.route"
+  route -q -n add -inet 0.0.0.0/1 -interface "$iface" >/dev/null
+  route -q -n add -inet 128.0.0.0/1 -interface "$iface" >/dev/null
+
+  ipv6_block
+  dns_set "$dns"
+  echo "ok awg $iface"
+}
+
+status() {
+  if [[ -f $RUN/xray.pid ]] && kill -0 "$(cat "$RUN/xray.pid")" 2>/dev/null; then
+    echo "xray $XRAY_TUN"
+  elif [[ -f $RUN/wg.iface ]] && ifconfig "$(cat "$RUN/wg.iface")" >/dev/null 2>&1; then
+    local iface; iface="$(cat "$RUN/wg.iface")"
+    echo "awg $iface"
+    "$DIR/awg" show "$iface" latest-handshakes 2>/dev/null | awk '{print "handshake", $2}'
+    "$DIR/awg" show "$iface" transfer 2>/dev/null | awk '{print "transfer", $2, $3}'
+  else
+    echo "down"
+  fi
+}
+
+case "${1:-}" in
+  version) echo "$VERSION" ;;
+  start-xray) start_xray "${2:-}" "${3:-}" ;;
+  start-awg) start_awg "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" ;;
+  stop) stop_all; echo "ok" ;;
+  status) status ;;
+  *) die "неизвестная команда" ;;
+esac

@@ -1,0 +1,43 @@
+{
+  "version": 2,
+  "name": "My VPN",
+  "client": "example",
+  "host": "203.0.113.10",
+  "dns": "1.1.1.1, 8.8.8.8",
+  "vless": {
+    "uuid": "00000000-0000-0000-0000-000000000000",
+    "sni": "www.microsoft.com",
+    "publicKey": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+    "shortId": "0123456789abcdef",
+    "fingerprint": "chrome",
+    "tcpPort": 443
+  },
+  "awg": {
+    "port": 53685,
+    "privateKey": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "address": "10.77.77.2/32",
+    "mtu": 1280,
+    "serverPublicKey": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "presharedKey": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "jc": 4,
+    "jmin": 40,
+    "jmax": 70,
+    "s1": 113,
+    "s2": 40,
+    "s3": 54,
+    "s4": 8,
+    "h1": "298134308",
+    "h2": "1558081262",
+    "h3": "1826089798",
+    "h4": "1828674786",
+    "i1": "<r 2><b 0x01000001000000000000037777770679616e6465780272750000010001>"
+  },
+  "hy2": {
+    "port": 443,
+    "obfsPort": 29426,
+    "auth": "REPLACE_ME",
+    "sni": "www.bing.com",
+    "pinSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "obfsPassword": "REPLACE_ME"
+  }
+}

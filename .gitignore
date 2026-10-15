@@ -1,0 +1,30 @@
+# Профили и экспорты содержат приватные ключи.
+config/*.json
+!config/example.json
+exports/
+.legacy/
+.tools/
+__pycache__/
+*.pyc
+.DS_Store
+# Приложенный скриншот содержит данные доступа.
+/Снимок экрана 2026-10-14 в 21.13.24.png
+
+# Старые сборки могут содержать ключи.
+*.apk
+*.aab
+
+# Готовые приложения включают приватные профили.
+dist/
+android/.gradle/
+android/build/
+android/app/build/
+android/app/libs/
+android/local.properties
+android/.idea/
+macos/.build/
+macos/build/
+macos/vendor/
+
+# Локальное окружение инструмента публикации обновлений.
+.venv/
