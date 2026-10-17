@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=My VPN
+Comment=Private VPN connection and encrypted profile updates
+Comment[ru]=VPN и зашифрованные обновления конфигурации
+Exec=myvpn
+Icon=myvpn
+Terminal=false
+Categories=Network;Security;
+StartupNotify=true
+StartupWMClass=myvpn
+Keywords=VPN;VLESS;Hysteria;Amnezia;

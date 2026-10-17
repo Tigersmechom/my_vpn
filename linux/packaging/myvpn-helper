@@ -1,0 +1,6 @@
+#!/usr/bin/python3 -I
+# Isolated Python ignores cwd, PYTHONPATH and user site packages at the root boundary.
+import sys
+sys.path.insert(0, "/usr/lib/myvpn")
+from myvpn.helper import main
+sys.exit(main())

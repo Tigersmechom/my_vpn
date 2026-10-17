@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Управление My VPN: VLESS + REALITY/TCP, Hysteria 2 и AmneziaWG.
 #   vpnctl add <имя> [--no-render]  добавить клиента
+#   vpnctl add-awg-device <имя> <клиент> отдельный AWG, общие Xray-ключи; без перезапуска
 #   vpnctl remove <имя>            удалить клиента
 #   vpnctl list                    список клиентов
 #   vpnctl profile <имя>           JSON-профиль версии 2
@@ -30,6 +31,7 @@ fi
 STATE_DIR="$ROOT/etc/myvpn"
 SERVER_ENV="$STATE_DIR/server.env"
 CLIENTS_DIR="$STATE_DIR/clients"
+AWG_DEVICES_DIR="$STATE_DIR/awg-devices"
 XRAY_CONFIG="$ROOT/usr/local/etc/xray/config.json"
 AWG_CONFIG="$ROOT/etc/amnezia/amneziawg/awg0.conf"
 LEGACY_WG_CONFIG="$ROOT/etc/wireguard/wg0.conf"
@@ -71,7 +73,13 @@ PY
 [[ -f $SERVER_ENV ]] || die "сервер не установлен, сначала install.sh"
 safe_source "$SERVER_ENV" server
 valid_name() { [[ ${1:-} =~ ^[a-zA-Z0-9_-]{1,32}$ ]] || die "имя клиента: латиница, цифры, - и _ (до 32 символов)"; }
-client_file() { printf '%s/%s.env\n' "$CLIENTS_DIR" "$1"; }
+client_file() {
+  if [[ -e $AWG_DEVICES_DIR/$1.env || -L $AWG_DEVICES_DIR/$1.env ]]; then
+    printf '%s/%s.env\n' "$AWG_DEVICES_DIR" "$1"
+  else
+    printf '%s/%s.env\n' "$CLIENTS_DIR" "$1"
+  fi
+}
 
 validate_server() {
   python3 - "$PUBLIC_HOST" "$REALITY_SNI" "$HY2_SNI" "$WAN_IF" "$AWG_NET" "$CLIENT_DNS" \
@@ -109,7 +117,7 @@ load_client() {
 
 next_index() {
   local f i used=" "
-  for f in "$CLIENTS_DIR"/*.env; do
+  for f in "$CLIENTS_DIR"/*.env "$AWG_DEVICES_DIR"/*.env; do
     [[ -f $f ]] || continue
     load_client "$(basename "$f" .env)"
     used+="$CLIENT_INDEX "
@@ -144,9 +152,84 @@ EOF
   if ((render)); then cmd_render; fi
 }
 
+# A second desktop can share the existing Xray account, while WireGuard roaming
+# requires a unique key/address per concurrently connected device. Store these
+# peers separately so future render includes them only in AmneziaWG, not Xray.
+cmd_add_awg_device() {
+  [[ $# -eq 2 ]] || die "vpnctl add-awg-device <имя> <существующий клиент>"
+  local name="$1" source_name="$2" f index private public preshared source_uuid source_auth backup psk
+  valid_name "$name"
+  valid_name "$source_name"
+  [[ -f $CLIENTS_DIR/$source_name.env ]] || die "нужен основной клиент-источник"
+  f="$(client_file "$name")"
+  [[ ! -e $f && ! -L $f ]] || die "клиент '$name' уже существует"
+  validate_server
+  load_client "$source_name"
+  source_uuid="$VLESS_UUID"; source_auth="$HY2_AUTH"
+  index="$(next_index)"
+  private="$(awg genkey)"
+  public="$(awg pubkey <<<"$private")"
+  preshared="$(awg genpsk)"
+  [[ -n $private && -n $public && -n $preshared ]] || die "не удалось создать ключи AmneziaWG"
+  [[ -f $AWG_CONFIG && ! -L $AWG_CONFIG ]] || die "сначала настройте базовый AmneziaWG"
+  mkdir -p "$AWG_DEVICES_DIR"
+  chmod 700 "$AWG_DEVICES_DIR"
+  backup="$(mktemp "$STATE_DIR/.awg-device-backup.XXXXXX")"
+  cp -p "$AWG_CONFIG" "$backup"
+  f="$AWG_DEVICES_DIR/$name.env"
+  cat >"$f" <<EOF
+CLIENT_NAME='$name'
+CLIENT_INDEX=$index
+VLESS_UUID='$source_uuid'
+AWG_PRIVATE_KEY='$private'
+AWG_PUBLIC_KEY='$public'
+AWG_PRESHARED_KEY='$preshared'
+HY2_AUTH='$source_auth'
+EOF
+  if ! (render_awg); then
+    mv -- "$backup" "$AWG_CONFIG"; rm -f -- "$f"
+    die "не удалось сохранить отдельный AWG; прежний конфиг восстановлен"
+  fi
+  load_client "$name"
+  psk="$(mktemp "$STATE_DIR/.awg-device-psk.XXXXXX")"
+  printf '%s\n' "$AWG_PRESHARED_KEY" >"$psk"
+  if systemctl is-active -q awg-quick@awg0; then
+    if ! awg set awg0 peer "$AWG_PUBLIC_KEY" preshared-key "$psk" allowed-ips "$AWG_NET.$CLIENT_INDEX/32"; then
+      awg set awg0 peer "$AWG_PUBLIC_KEY" remove >/dev/null 2>&1 || true
+      mv -- "$backup" "$AWG_CONFIG"; rm -f -- "$f" "$psk"
+      die "не удалось добавить AWG peer; прежний конфиг восстановлен"
+    fi
+  fi
+  rm -f -- "$backup" "$psk"
+  echo "Устройство '$name' добавлено: отдельный AmneziaWG, общие Xray-ключи '$source_name'. Сервисы не перезапускались."
+}
+
+cmd_remove_awg_device() {
+  local name="$1" original backup
+  load_client "$name"
+  original="$(mktemp "$STATE_DIR/.awg-device-removed.XXXXXX")"
+  backup="$(mktemp "$STATE_DIR/.awg-device-backup.XXXXXX")"
+  cp -p "$AWG_CONFIG" "$backup"
+  mv -- "$AWG_DEVICES_DIR/$name.env" "$original"
+  if ! (render_awg); then
+    mv -- "$original" "$AWG_DEVICES_DIR/$name.env"; mv -- "$backup" "$AWG_CONFIG"
+    die "не удалось сохранить удаление AWG peer"
+  fi
+  if systemctl is-active -q awg-quick@awg0 && ! awg set awg0 peer "$AWG_PUBLIC_KEY" remove; then
+    mv -- "$original" "$AWG_DEVICES_DIR/$name.env"; mv -- "$backup" "$AWG_CONFIG"
+    die "не удалось отозвать AWG peer; прежние файлы восстановлены"
+  fi
+  rm -f -- "$original" "$backup"
+  echo "Отдельный AmneziaWG '$name' удалён. Общие Xray-ключи остаются у основного клиента."
+}
+
 cmd_remove() {
   valid_name "${1:-}"
   [[ -f $(client_file "$1") && ! -L $(client_file "$1") ]] || die "клиент '$1' не найден"
+  if [[ -f $AWG_DEVICES_DIR/$1.env ]]; then
+    cmd_remove_awg_device "$1"
+    return
+  fi
   extra_preflight
   rm -- "$(client_file "$1")"
   echo "Клиент '$1' удалён"
@@ -155,7 +238,7 @@ cmd_remove() {
 
 cmd_list() {
   local f
-  for f in "$CLIENTS_DIR"/*.env; do
+  for f in "$CLIENTS_DIR"/*.env "$AWG_DEVICES_DIR"/*.env; do
     [[ -f $f ]] || continue
     (load_client "$(basename "$f" .env)"; printf '%-20s AWG %s.%s  %s\n' "$CLIENT_NAME" "$AWG_NET" "$CLIENT_INDEX" "$VLESS_UUID")
   done
@@ -245,20 +328,28 @@ nat_rules() {
 
 render_awg() {
   local f next
-  mkdir -p "$(dirname "$AWG_CONFIG")"
-  next="$(mktemp "${AWG_CONFIG}.next.XXXXXX")"
-  {
-    printf '[Interface]\nPrivateKey = %s\nAddress = %s.1/24\nListenPort = %s\n' "$AWG_SERVER_PRIVATE_KEY" "$AWG_NET" "$AWG_PORT"
-    printf 'Jc = %s\nJmin = %s\nJmax = %s\n' "$AWG_JC" "$AWG_JMIN" "$AWG_JMAX"
-    printf 'S1 = %s\nS2 = %s\nS3 = %s\nS4 = %s\n' "$AWG_S1" "$AWG_S2" "$AWG_S3" "$AWG_S4"
-    printf 'H1 = %s\nH2 = %s\nH3 = %s\nH4 = %s\n' "$AWG_H1" "$AWG_H2" "$AWG_H3" "$AWG_H4"
-    printf 'PostUp = %s\nPostDown = %s\n' "$(nat_rules A "$AWG_NET")" "$(nat_rules D "$AWG_NET")"
-    for f in "$CLIENTS_DIR"/*.env; do
+  mkdir -p "$(dirname "$AWG_CONFIG")" || return 1
+  next="$(mktemp "${AWG_CONFIG}.next.XXXXXX")" || return 1
+  # This function is also called in a conditional rollback path, where Bash
+  # disables errexit even in nested functions. Every failure must be explicit.
+  if ! (
+    printf '[Interface]\nPrivateKey = %s\nAddress = %s.1/24\nListenPort = %s\n' "$AWG_SERVER_PRIVATE_KEY" "$AWG_NET" "$AWG_PORT" || exit 1
+    printf 'Jc = %s\nJmin = %s\nJmax = %s\n' "$AWG_JC" "$AWG_JMIN" "$AWG_JMAX" || exit 1
+    printf 'S1 = %s\nS2 = %s\nS3 = %s\nS4 = %s\n' "$AWG_S1" "$AWG_S2" "$AWG_S3" "$AWG_S4" || exit 1
+    printf 'H1 = %s\nH2 = %s\nH3 = %s\nH4 = %s\n' "$AWG_H1" "$AWG_H2" "$AWG_H3" "$AWG_H4" || exit 1
+    printf 'PostUp = %s\nPostDown = %s\n' "$(nat_rules A "$AWG_NET")" "$(nat_rules D "$AWG_NET")" || exit 1
+    for f in "$CLIENTS_DIR"/*.env "$AWG_DEVICES_DIR"/*.env; do
       [[ -f $f ]] || continue
-      (load_client "$(basename "$f" .env)"; printf '\n# %s\n[Peer]\nPublicKey = %s\nPresharedKey = %s\nAllowedIPs = %s.%s/32\n' "$CLIENT_NAME" "$AWG_PUBLIC_KEY" "$AWG_PRESHARED_KEY" "$AWG_NET" "$CLIENT_INDEX")
+      (load_client "$(basename "$f" .env)"; printf '\n# %s\n[Peer]\nPublicKey = %s\nPresharedKey = %s\nAllowedIPs = %s.%s/32\n' "$CLIENT_NAME" "$AWG_PUBLIC_KEY" "$AWG_PRESHARED_KEY" "$AWG_NET" "$CLIENT_INDEX") || exit 1
     done
-  } >"$next"
-  mv -- "$next" "$AWG_CONFIG"
+  ) >"$next"; then
+    rm -f -- "$next"
+    return 1
+  fi
+  if ! mv -- "$next" "$AWG_CONFIG"; then
+    rm -f -- "$next"
+    return 1
+  fi
 }
 
 extra_preflight() {
@@ -458,6 +549,7 @@ cmd_status() {
 
 case "${1:-}" in
   add) shift; cmd_add "$@" ;;
+  add-awg-device) shift; cmd_add_awg_device "$@" ;;
   remove) shift; cmd_remove "$@" ;;
   list) cmd_list ;;
   profile) shift; cmd_profile "$@" ;;

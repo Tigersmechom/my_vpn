@@ -1,0 +1,8 @@
+#!/bin/sh
+set -e
+if [ "$1" = configure ]; then
+    if [ -d /run/systemd/system ]; then systemctl daemon-reload; fi
+    if command -v update-desktop-database >/dev/null; then update-desktop-database -q || true; fi
+    if command -v gtk-update-icon-cache >/dev/null; then gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true; fi
+fi
+exit 0

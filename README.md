@@ -1,6 +1,7 @@
-# My VPN — собственные приложения Android и macOS
+# My VPN — собственные приложения Android, macOS и Ubuntu
 
-Персональный VPN на своём VPS. Основной клиент — Android; есть приложение для Apple Silicon.
+Персональный VPN на своём VPS. Основной клиент — Android; есть приложения для Apple Silicon
+и Ubuntu Desktop 24.04 на Intel/AMD.
 Настройки и дополнительные режимы доставляются кнопкой **«Обновить конфигурацию»**.
 Посредник не используется. Разработка интеграции с v2rayTun прекращена.
 
@@ -57,6 +58,7 @@ TCP передал полный ответ. Это не основание сч�
 - `dist/MyVPN-1.2.0-android-arm64.apk` — современные Android-телефоны, Android 7+.
 - `dist/MyVPN-1.2.0-android-universal.apk` — несколько архитектур.
 - `dist/MyVPN-1.2.0-macos-arm64.zip` — Apple Silicon, macOS 13+.
+- `dist/MyVPN-1.2.0-ubuntu24.04-amd64.deb` — Ubuntu Desktop 24.04, Intel/AMD.
 - `dist/SHA256SUMS.txt` — контрольные суммы локальных сборок.
 
 Сборки персональные: содержат профили VPN и ключ расшифровки обновлений. Они исключены из Git.
@@ -64,6 +66,12 @@ Android сохраняет прежнюю локальную debug-подпис�
 Mac-приложение подписано ad-hoc, без нотарификации Apple; распакуйте и перенесите его в
 «Программы». Установка сетевого компонента выполняется только по нажатию пользователя
 с запросом пароля администратора. При подключении используйте один VPN за раз.
+
+Ubuntu: установите пакет командой `sudo apt install ./MyVPN-1.2.0-ubuntu24.04-amd64.deb`,
+затем откройте **My VPN** в меню приложений. Сетевой компонент запрашивает пароль через polkit;
+установка сама по себе не включает VPN. Профиль Linux получает отдельные ключ и адрес
+AmneziaWG для одновременного подключения с Mac. Режимы Xray используют общий аккаунт Mac.
+[Установка, сборка и обслуживание Ubuntu](linux/README.md).
 
 Версия 1.1.0 уже умеет получить пять дополнительных режимов кнопкой обновления: для них
 переустановка не нужна. Исправления встроенного VLESS, диагностика и восстановление загрузки
@@ -92,13 +100,13 @@ Mac-приложение подписано ad-hoc, без нотарифика�
 На Android обновлятор сначала использует работающий SOCKS-туннель. При сетевой ошибке он
 один раз пробует тот же адрес напрямую по HTTPS. Проверки сертификата, AES-GCM и ревизии
 остаются обязательными; ошибка подлинности не запускает повторную попытку другим путём.
-На macOS загрузка следует системному маршруту: неработающий VPN может потребоваться
+На macOS и Ubuntu загрузка следует системному маршруту: неработающий VPN может потребоваться
 отключить вручную, чтобы получить новые настройки.
 
 ## Обновление одной кнопкой
 
-- Публичные `updates/android.json` и `updates/mac.json` содержат только зашифрованные профили.
-- Приватные `config/android-update.json` и `config/mac-update.json` содержат постоянный HTTPS URL,
+- Публичные `updates/android.json`, `updates/mac.json` и `updates/linux.json` содержат только зашифрованные профили.
+- Приватные `config/android-update.json`, `config/mac-update.json` и `config/linux-update.json` содержат постоянный HTTPS URL,
   идентификатор клиента, ключ AES-256-GCM и минимальную ревизию; в Git не попадают.
 - Проверяются подлинность, клиент, схема, размер и ревизия. Откат к старой ревизии отклоняется.
 - Запросы имеют уникальный параметр против кеширования. GitHub всё же может показывать новую
@@ -119,12 +127,13 @@ python3 -m venv .venv
 .venv/bin/pip install -r tools/requirements-update.txt
 ```
 
-После сохранения новых профилей в `config/android.json` и `config/mac.json`:
+После сохранения новых профилей в `config/android.json`, `config/mac.json` и `config/linux.json`:
 
 ```bash
 .venv/bin/python tools/publish_updates.py --profile config/android.json --bootstrap config/android-update.json --output updates/android.json
 .venv/bin/python tools/publish_updates.py --profile config/mac.json --bootstrap config/mac-update.json --output updates/mac.json
-git add updates/android.json updates/mac.json
+.venv/bin/python tools/publish_updates.py --profile config/linux.json --bootstrap config/linux-update.json --output updates/linux.json
+git add updates/android.json updates/mac.json updates/linux.json
 git commit -m "Update encrypted VPN profiles"
 git push origin main
 ```
@@ -213,5 +222,5 @@ AmneziaWG требует отдельной проверки на устройс
 физический интерфейс Mac. Проблема конкретного Android/его сети при этой проверке не
 воспроизвелась; окончательный результат требует проверки на этом телефоне.
 
-В Git не входят реальные профили, bootstrap, APK/app, экспорты и скриншот с реквизитами.
+В Git не входят реальные профили, bootstrap, APK/app/deb, экспорты и скриншот с реквизитами.
 Старые сборки и исходники сохранены локально в `.legacy/`; публичные файлы обновлений зашифрованы.

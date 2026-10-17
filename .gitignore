@@ -26,6 +26,9 @@ android/.idea/
 macos/.build/
 macos/build/
 macos/vendor/
+linux/build/
+linux/vendor/
+*.deb
 
 # Локальное окружение инструмента публикации обновлений.
 .venv/

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>My VPN</vendor>
+  <action id="org.myvpn.manage">
+    <description>Manage the My VPN tunnel</description>
+    <description xml:lang="ru">Управление туннелем My VPN</description>
+    <message>Authentication is required to connect or disconnect My VPN</message>
+    <message xml:lang="ru">Введите пароль администратора для подключения или отключения My VPN</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/myvpn/myvpn-helper</annotate>
+  </action>
+</policyconfig>

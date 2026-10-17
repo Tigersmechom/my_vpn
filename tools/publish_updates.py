@@ -21,7 +21,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 BOOTSTRAP_FORMAT = "myvpn-bootstrap-v1"
 UPDATE_FORMAT = "myvpn-update-v1"
-CLIENTS = ("android", "mac")
+CLIENTS = ("android", "mac", "linux")
 MAX_REVISION = 2147483647
 MAX_DOCUMENT_BYTES = 1024 * 1024
 
@@ -50,7 +50,7 @@ def _revision(value):
 
 def _client(value):
     if value not in CLIENTS:
-        raise UpdateError("client must be android or mac")
+        raise UpdateError("client must be android, mac or linux")
     return value
 
 

@@ -53,14 +53,21 @@ if name == "xray":
         sys.exit("unexpected xray call: " + repr(args))
 elif name in ("awg", "wg"):
     if args in (["genkey"], ["genpsk"]):
+        if args == ["genpsk"] and os.environ.get("MYVPN_TEST_AWG_KEY_FAILURE") == "1":
+            sys.exit(26)
         print(base64.b64encode(secrets.token_bytes(32)).decode())
     elif args == ["pubkey"]:
+        if os.environ.get("MYVPN_TEST_AWG_CORRUPT_SOURCE") == "1":
+            path = Path(os.environ["MYVPN_ROOT"]) / "etc/myvpn/clients/mac.env"
+            path.write_text("INVALID='changed-during-key-generation'\n")
         print(base64.b64encode(hashlib.sha256(sys.stdin.buffer.read()).digest()).decode())
-    elif not args or args[0] not in ("syncconf", "show", "setconf"):
+    elif args and args[0] == "set" and "preshared-key" in args and os.environ.get("MYVPN_TEST_AWG_REJECT") == "1":
+        sys.exit(25)
+    elif not args or args[0] not in ("syncconf", "show", "setconf", "set"):
         sys.exit("unexpected key command: " + repr(args))
 elif name == "systemctl":
     if args and args[0] == "is-active":
-        sys.exit(1)
+        sys.exit(0 if os.environ.get("MYVPN_TEST_AWG_ACTIVE") == "1" else 1)
 elif name in ("awg-quick", "wg-quick"):
     if args and args[0] == "strip":
         path = Path(os.environ["MYVPN_ROOT"]) / "etc/amnezia/amneziawg/awg0.conf"
@@ -160,6 +167,68 @@ class ServerIntegrationTests(unittest.TestCase):
 
     def profile(self, name):
         return json.loads(self.run_ctl("profile", name).stdout)
+
+    def test_independent_awg_device_does_not_restart_or_duplicate_xray(self):
+        self.make_client("mac")
+        self.run_ctl("render")
+        original_xray = self.xray_config.read_bytes()
+        self.log.write_text("")
+        self.run_ctl("add-awg-device", "linux", "mac", extra_env={"MYVPN_TEST_AWG_ACTIVE": "1"})
+        original, added = self.profile("mac"), self.profile("linux")
+        self.assertNotEqual(original["awg"]["privateKey"], added["awg"]["privateKey"])
+        self.assertNotEqual(original["awg"]["address"], added["awg"]["address"])
+        self.assertEqual(original["vless"], added["vless"])
+        self.assertEqual(original["hy2"], added["hy2"])
+        self.assertEqual(original_xray, self.xray_config.read_bytes())
+        self.assertIn("# linux", self.awg_config.read_text())
+        calls = self.calls()
+        self.assertTrue(any(c[:2] == ["awg", "set"] and "preshared-key" in c for c in calls))
+        self.assertFalse(any(c[0] == "systemctl" and "restart" in c for c in calls))
+        self.run_ctl("add", "phone", "--no-render")
+        self.assertNotEqual(self.profile("phone")["awg"]["address"], added["awg"]["address"])
+        self.run_ctl("render")
+        self.assertIn("# linux", self.awg_config.read_text())
+        self.assertNotIn('"email": "linux"', self.xray_config.read_text())
+        self.log.write_text("")
+        self.run_ctl("remove", "linux", extra_env={"MYVPN_TEST_AWG_ACTIVE": "1"})
+        self.assertNotIn("# linux", self.awg_config.read_text())
+        self.assertFalse(any(c[0] == "systemctl" and "restart" in c for c in self.calls()))
+
+    def test_awg_device_failure_preserves_existing_configuration(self):
+        self.make_client("mac")
+        self.run_ctl("render")
+        original = self.awg_config.read_bytes()
+        self.run_ctl("add-awg-device", "linux", "mac", ok=False,
+                     extra_env={"MYVPN_TEST_AWG_ACTIVE": "1", "MYVPN_TEST_AWG_REJECT": "1"})
+        self.assertEqual(original, self.awg_config.read_bytes())
+        self.assertFalse((self.state / "awg-devices/linux.env").exists())
+
+    def test_awg_device_key_generation_failure_does_not_create_empty_credentials(self):
+        self.make_client("mac")
+        self.run_ctl("render")
+        original = self.awg_config.read_bytes()
+        self.log.write_text("")
+        self.run_ctl("add-awg-device", "linux", "mac", ok=False,
+                     extra_env={"MYVPN_TEST_AWG_ACTIVE": "1", "MYVPN_TEST_AWG_KEY_FAILURE": "1"})
+        self.assertEqual(original, self.awg_config.read_bytes())
+        self.assertFalse((self.state / "awg-devices/linux.env").exists())
+        self.assertFalse(any(call[:2] == ["awg", "set"] for call in self.calls()))
+
+    def test_awg_device_render_failure_cannot_publish_partial_peer_list(self):
+        self.make_client("mac")
+        self.make_client("phone", 3)
+        self.run_ctl("render")
+        original = self.awg_config.read_bytes()
+        self.log.write_text("")
+        # Simulate an existing credential file becoming invalid after the
+        # initial address scan, while add-awg-device is generating its key.
+        self.run_ctl("add-awg-device", "linux", "mac", ok=False,
+                     extra_env={"MYVPN_TEST_AWG_ACTIVE": "1", "MYVPN_TEST_AWG_CORRUPT_SOURCE": "1"})
+        self.assertEqual(original, self.awg_config.read_bytes())
+        self.assertFalse((self.state / "awg-devices/linux.env").exists())
+        self.assertFalse(any(call[:2] == ["awg", "set"] for call in self.calls()))
+        self.assertFalse(any(call[0] == "systemctl" and "restart" in call for call in self.calls()))
+        self.assertFalse(list(self.awg_config.parent.glob("awg0.conf.next.*")))
 
     def test_add_list_profile_remove_client_lifecycle(self):
         self.run_ctl("add", "phone", "--no-render")
