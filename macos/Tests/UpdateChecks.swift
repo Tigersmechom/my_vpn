@@ -4,6 +4,24 @@ import CryptoKit
 enum UpdateChecks {
     static func run(profile: Profile, publishedProfile: Profile, output: URL, source: URL, repository: URL) throws {
         precondition(profile.connections.count == VPNProtocol.allCases.count)
+        let origin = URL(string: "https://example.com/path%20with%2Fescape/mac.json?token=a%2Bb&sig=a%3Db&empty=&flag")!
+        let originalComponents = URLComponents(url: origin, resolvingAgainstBaseURL: false)!
+        let nonce = UUID(uuidString: "00000000-0000-4000-8000-000000000001")!
+        let refreshed = try RemoteUpdates.requestURL(for: origin, nonce: nonce)
+        let refreshedComponents = URLComponents(url: refreshed, resolvingAgainstBaseURL: false)!
+        precondition(refreshedComponents.scheme == originalComponents.scheme && refreshedComponents.host == originalComponents.host)
+        precondition(refreshedComponents.percentEncodedPath == originalComponents.percentEncodedPath)
+        precondition(refreshedComponents.percentEncodedQuery == originalComponents.percentEncodedQuery! + "&_myvpn_refresh=" + nonce.uuidString)
+        let freshA = try RemoteUpdates.requestURL(for: origin)
+        let freshB = try RemoteUpdates.requestURL(for: origin)
+        precondition(freshA != freshB)
+        let withoutQuery = try RemoteUpdates.requestURL(for: URL(string: "https://example.com/mac.json")!, nonce: nonce)
+        precondition(withoutQuery.query == "_myvpn_refresh=" + nonce.uuidString)
+        do {
+            _ = try RemoteUpdates.requestURL(for: URL(string: "http://example.com/mac.json")!)
+            preconditionFailure("Insecure update URL was accepted")
+        } catch { }
+        print("Fresh update URLs preserve encoded path/query and require HTTPS")
         let key = Data((0..<32).map(UInt8.init))
         let bootstrap = UpdateBootstrap(client: "mac", url: URL(string: "https://example.com/mac.json")!, key: key, minRevision: 1)
         func encoded(_ profileJSON: [String: Any], revision: Int = 1, client: String = "mac", innerRevision: Int? = nil) throws -> Data {

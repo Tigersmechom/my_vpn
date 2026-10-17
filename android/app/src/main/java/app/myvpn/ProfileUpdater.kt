@@ -5,6 +5,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URL
+import java.net.URI
 import java.io.IOException
 import java.net.SocketTimeoutException
 import java.security.GeneralSecurityException
@@ -31,7 +32,7 @@ data class UpdateBootstrap(val client: String, val url: String, val key: ByteArr
             require(client == "android") { "Настройки обновления предназначены для другого устройства" }
             val url = obj.getString("url")
             val parsed = URL(url)
-            require(parsed.protocol == "https" && parsed.userInfo == null && parsed.host.isNotBlank()) {
+            require(parsed.protocol == "https" && parsed.userInfo == null && parsed.ref == null && parsed.host.isNotBlank()) {
                 "Для обновлений требуется HTTPS"
             }
             val key = Base64.decode(obj.getString("key"))
@@ -90,6 +91,15 @@ private fun exactRevision(obj: JSONObject, key: String): Int {
     return (value as Number).toInt()
 }
 
+/** Reduce intermediary caching; the authenticated revision floor still rejects stale responses. */
+internal fun cacheBustedUpdateUrl(url: String): String {
+    val parsed = URI(url)
+    require(parsed.scheme == "https" && parsed.host?.isNotBlank() == true &&
+        parsed.rawUserInfo == null && parsed.rawFragment == null) { "Для обновлений требуется HTTPS без данных пользователя и фрагмента" }
+    val separator = if (parsed.rawQuery == null) "?" else "&"
+    return parsed.toASCIIString() + separator + "_myvpn_nonce=" + UUID.randomUUID()
+}
+
 object ProfileUpdater {
     private val deadlines = Executors.newSingleThreadScheduledExecutor { task ->
         Thread(task, "vpn-update-deadline").apply { isDaemon = true }
@@ -124,7 +134,7 @@ object ProfileUpdater {
     private fun fetch(url: String, socksPort: Int): ByteArray {
         val proxy = if (socksPort > 0) java.net.Proxy(java.net.Proxy.Type.SOCKS, java.net.InetSocketAddress("127.0.0.1", socksPort))
             else java.net.Proxy.NO_PROXY
-        val connection = URL(url).openConnection(proxy) as HttpsURLConnection
+        val connection = URL(cacheBustedUpdateUrl(url)).openConnection(proxy) as HttpsURLConnection
         val expired = AtomicBoolean(false)
         val deadline = deadlines.schedule({
             expired.set(true)

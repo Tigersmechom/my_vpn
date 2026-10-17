@@ -41,6 +41,23 @@ private final class HTTPSRedirects: NSObject, URLSessionTaskDelegate {
 enum RemoteUpdates {
     static let maxBytes = 1_048_576
 
+    /// GitHub/CDN может вернуть старую ревизию даже при отключённом локальном кэше.
+    /// Меняем только добавленный параметр: исходные path и закодированный query сохраняются.
+    static func requestURL(for url: URL, nonce: UUID = UUID()) throws -> URL {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.scheme == "https", components.host != nil else {
+            throw VPNError("Некорректный HTTPS-адрес обновления")
+        }
+        let suffix = "_myvpn_refresh=\(nonce.uuidString)"
+        if let query = components.percentEncodedQuery, !query.isEmpty {
+            components.percentEncodedQuery = query + "&" + suffix
+        } else {
+            components.percentEncodedQuery = suffix
+        }
+        guard let result = components.url else { throw VPNError("Некорректный адрес обновления") }
+        return result
+    }
+
     static func verify(_ data: Data, bootstrap: UpdateBootstrap, highestRevision: Int) throws -> VerifiedUpdate {
         do {
             guard data.count <= maxBytes,
@@ -111,8 +128,9 @@ enum RemoteUpdates {
         let session = URLSession(configuration: configuration, delegate: HTTPSRedirects(), delegateQueue: nil)
         defer { session.invalidateAndCancel() }
         do {
-            var request = URLRequest(url: bootstrap.url)
+            var request = URLRequest(url: try requestURL(for: bootstrap.url))
             request.setValue("application/json", forHTTPHeaderField: "Accept")
+            request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
             let (bytes, response) = try await session.bytes(for: request)
             guard let http = response as? HTTPURLResponse, http.statusCode == 200,
                   http.url?.scheme == "https", response.expectedContentLength <= Int64(maxBytes)

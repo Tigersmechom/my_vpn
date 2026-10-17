@@ -9,6 +9,7 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import java.io.IOException
 import java.net.SocketTimeoutException
+import java.net.URI
 import kotlin.io.encoding.Base64
 
 class ProfileUpdateTest {
@@ -193,6 +194,31 @@ class ProfileUpdateTest {
             }
         }
         assertEquals(1, requests)
+    }
+
+    @Test fun updateCacheBusterKeepsEncodedPathQueryAndCreatesFreshNonce() {
+        val original = "https://example.org/a%2Fb/profile.json?branch=a%2Bb&value=x%26y%3Dz"
+        val first = URI(cacheBustedUpdateUrl(original))
+        val second = URI(cacheBustedUpdateUrl(original))
+        assertEquals("https", first.scheme)
+        assertEquals("example.org", first.host)
+        assertEquals("/a%2Fb/profile.json", first.rawPath)
+        val prefix = "branch=a%2Bb&value=x%26y%3Dz&_myvpn_nonce="
+        assertTrue(first.rawQuery.startsWith(prefix))
+        assertTrue(second.rawQuery.startsWith(prefix))
+        java.util.UUID.fromString(first.rawQuery.removePrefix(prefix))
+        java.util.UUID.fromString(second.rawQuery.removePrefix(prefix))
+        assertNotEquals(first.rawQuery, second.rawQuery)
+        assertNull(first.rawFragment)
+        assertNull(first.rawUserInfo)
+        assertTrue(URI(cacheBustedUpdateUrl("https://example.org/feed.json")).rawQuery.startsWith("_myvpn_nonce="))
+    }
+
+    @Test fun updateCacheBusterRejectsNonHttpsCredentialsAndFragments() {
+        for (url in listOf("http://example.org/feed.json", "https://user:password@example.org/feed.json",
+            "https://example.org/feed.json#part")) {
+            assertThrows(IllegalArgumentException::class.java) { cacheBustedUpdateUrl(url) }
+        }
     }
 
     @Test fun localPublisherEnvelopeWhenExplicitlyRequested() {
