@@ -35,6 +35,8 @@ AWG_CONFIG="$ROOT/etc/amnezia/amneziawg/awg0.conf"
 LEGACY_WG_CONFIG="$ROOT/etc/wireguard/wg0.conf"
 XRAY_BIN="$ROOT/usr/local/bin/xray"
 EXPORT_SCRIPT="$ROOT/usr/local/lib/myvpn/export.py"
+EXTRA_SCRIPT="$ROOT/usr/local/lib/myvpn/extra_protocols.py"
+EXTRA_STATE="$STATE_DIR/extra-protocols.json"
 
 # State files contain only generated, literal assignments. Never execute arbitrary
 # shell syntax from them; also reject symlinks and group/world-accessible secrets.
@@ -145,6 +147,7 @@ EOF
 cmd_remove() {
   valid_name "${1:-}"
   [[ -f $(client_file "$1") && ! -L $(client_file "$1") ]] || die "клиент '$1' не найден"
+  extra_preflight
   rm -- "$(client_file "$1")"
   echo "Клиент '$1' удалён"
   cmd_render
@@ -258,11 +261,30 @@ render_awg() {
   mv -- "$next" "$AWG_CONFIG"
 }
 
+extra_preflight() {
+  # A configured add-on must be reconciled too; otherwise remove would leave
+  # the revoked client authenticated on its independent Xray listeners.
+  [[ -e $EXTRA_STATE || -L $EXTRA_STATE ]] || return 0
+  [[ -f $EXTRA_STATE && ! -L $EXTRA_STATE ]] || die "неверный файл состояния дополнительных протоколов"
+  [[ -f $EXTRA_SCRIPT && ! -L $EXTRA_SCRIPT ]] || die "дополнительные протоколы настроены, но нет extra_protocols.py; обновите серверные скрипты"
+}
+
+render_extra() {
+  [[ -f $EXTRA_STATE ]] || return 0
+  if [[ -n $ROOT ]]; then
+    python3 "$EXTRA_SCRIPT" --root "$ROOT" install
+  else
+    python3 "$EXTRA_SCRIPT" install
+  fi
+}
+
 cmd_render() {
+  extra_preflight
   validate_server
   ensure_client_secrets
   render_xray
   render_awg
+  render_extra
   systemctl enable -q xray
   systemctl restart xray
   if systemctl is-active -q awg-quick@awg0; then

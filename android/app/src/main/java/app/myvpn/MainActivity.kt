@@ -77,6 +77,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -122,7 +123,15 @@ private fun HomeScreen(store: Store, onSettings: () -> Unit) {
     var testing by remember { mutableStateOf(false) }
     var testStep by remember { mutableStateOf("") }
     var testError by remember { mutableStateOf<String?>(null) }
+    var diagnosing by remember { mutableStateOf(false) }
+    var diagnosticReport by remember { mutableStateOf<DiagnosticReport?>(null) }
+    var diagnosticError by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
+
+    LaunchedEffect(status.state, status.since, status.socksPort, status.protocol?.name, status.host) {
+        diagnosticReport = null
+        diagnosticError = null
+    }
 
     fun doConnect() = VpnController.connect(store.profile, protocol)
 
@@ -156,6 +165,47 @@ private fun HomeScreen(store: Store, onSettings: () -> Unit) {
             item {
                 StatusCard(status, status.host.takeIf { status.state != VpnState.DOWN && it.isNotBlank() } ?: profile.host) {
                     if (status.state == VpnState.DOWN) connectWithPermission() else VpnController.disconnect()
+                }
+            }
+
+            item {
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Проверка соединения", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            diagnosticReport?.summary ?: "Проверит Google и загрузит 64 КиБ через текущий VPN. Соединение не переключается.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        diagnosticReport?.results?.forEach { result ->
+                            Text(result.message, style = MaterialTheme.typography.bodySmall,
+                                color = if (result.passed) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.error)
+                        }
+                        diagnosticError?.let {
+                            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                val checkedStatus = status
+                                diagnosing = true
+                                diagnosticReport = null
+                                diagnosticError = null
+                                scope.launch {
+                                    try {
+                                        val report = ConnectionDiagnostics.check(checkedStatus)
+                                        if (ConnectionDiagnostics.sameConnection(checkedStatus, VpnController.status.value)) {
+                                            diagnosticReport = report
+                                        } else diagnosticError = "Соединение изменилось. Повторите проверку."
+                                    } catch (e: CancellationException) {
+                                        throw e
+                                    } catch (_: Exception) {
+                                        diagnosticError = "Проверка недоступна. Убедитесь, что VPN включён, и повторите."
+                                    } finally { diagnosing = false }
+                                }
+                            },
+                            enabled = status.state == VpnState.UP && !diagnosing && !testing,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text(if (diagnosing) "Проверяю…" else "Проверить соединение") }
+                    }
                 }
             }
 
@@ -234,7 +284,7 @@ private fun HomeScreen(store: Store, onSettings: () -> Unit) {
                                     testing = false
                                 }
                             },
-                            enabled = status.state == VpnState.UP && !testing,
+                            enabled = status.state == VpnState.UP && !testing && !diagnosing,
                             modifier = Modifier.fillMaxWidth(),
                         ) { Text("Запустить тест") }
                     }
@@ -293,7 +343,7 @@ private fun StatusCard(status: VpnStatus, host: String, onToggle: () -> Unit) {
             Spacer(Modifier.height(20.dp))
             Text(
                 when (status.state) {
-                    VpnState.UP -> "Подключено"
+                    VpnState.UP -> "Туннель запущен"
                     VpnState.CONNECTING -> "Подключение…"
                     VpnState.DOWN -> "Отключено"
                 },

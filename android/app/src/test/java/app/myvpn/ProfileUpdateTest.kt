@@ -7,6 +7,8 @@ import org.junit.Test
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
+import java.io.IOException
+import java.net.SocketTimeoutException
 import kotlin.io.encoding.Base64
 
 class ProfileUpdateTest {
@@ -137,6 +139,60 @@ class ProfileUpdateTest {
         assertThrows(IllegalArgumentException::class.java) { decode(envelope(profile().put("extraXray", JSONObject()))) }
         val broken = extra().also { it.getJSONObject("outbound").put("settings", JSONObject()) }
         assertThrows(IllegalArgumentException::class.java) { decode(envelope(profile().put("extraXray", JSONArray().put(broken)))) }
+    }
+
+    @Test fun unavailableXrayFallsBackToSameHttpsFeedWithoutChangingAuthentication() {
+        val ports = mutableListOf<Int>()
+        val bytes = envelope(revision = 4).toString().toByteArray()
+        val update = ProfileUpdater.download(bootstrap, 3, 10808) { url, port ->
+            assertEquals(bootstrap.url, url)
+            ports += port
+            if (port != 0) throw SocketTimeoutException()
+            bytes
+        }
+        assertEquals(listOf(10808, 0), ports)
+        assertEquals(4, update.revision)
+    }
+
+    @Test fun workingVpnFeedIsPreferredAndDirectFailureIsNotRetried() {
+        val ports = mutableListOf<Int>()
+        ProfileUpdater.download(bootstrap, 0, 10808) { _, port ->
+            ports += port
+            envelope().toString().toByteArray()
+        }
+        assertEquals(listOf(10808), ports)
+        ports.clear()
+        val error = assertThrows(IllegalStateException::class.java) {
+            ProfileUpdater.download(bootstrap, 0, 0) { _, port ->
+                ports += port
+                throw IOException("private-network-details")
+            }
+        }
+        assertEquals(listOf(0), ports)
+        assertFalse(error.message.orEmpty().contains("private-network-details"))
+    }
+
+    @Test fun authenticationRollbackAndHttpFailuresNeverTriggerDirectFallback() {
+        val invalid = listOf(
+            "{}".toByteArray(),
+            envelope(revision = 2).toString().toByteArray(),
+            envelope().put("revision", 4).toString().toByteArray(),
+        )
+        for (bytes in invalid) {
+            var requests = 0
+            assertThrows(IllegalArgumentException::class.java) {
+                ProfileUpdater.download(bootstrap, 3, 10808) { _, _ -> requests++; bytes }
+            }
+            assertEquals(1, requests)
+        }
+        var requests = 0
+        assertThrows(IllegalArgumentException::class.java) {
+            ProfileUpdater.download(bootstrap, 3, 10808) { _, _ ->
+                requests++
+                throw IllegalArgumentException("HTTP error")
+            }
+        }
+        assertEquals(1, requests)
     }
 
     @Test fun localPublisherEnvelopeWhenExplicitlyRequested() {

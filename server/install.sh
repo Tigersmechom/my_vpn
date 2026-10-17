@@ -242,6 +242,11 @@ ensure_var HY2_PIN "'$(openssl x509 -in "$HY2_CERT" -noout -fingerprint -sha256 
 install -m 755 "$SCRIPT_DIR/vpnctl" /usr/local/bin/vpnctl
 install -d -m 755 /usr/local/lib/myvpn
 install -m 755 "$SCRIPT_DIR/export.py" /usr/local/lib/myvpn/export.py
+# Copy the optional manager without enabling its service on a fresh install.
+# Existing add-on state is reconciled by vpnctl when clients/configs change.
+if [[ -f "$SCRIPT_DIR/extra_protocols.py" ]]; then
+  install -m 755 "$SCRIPT_DIR/extra_protocols.py" /usr/local/lib/myvpn/extra_protocols.py
+fi
 
 if ! compgen -G "$STATE_DIR/clients/*.env" >/dev/null; then
   log "Клиенты по умолчанию: android, mac"

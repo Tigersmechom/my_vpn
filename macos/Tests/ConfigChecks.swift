@@ -5,12 +5,18 @@ struct ConfigChecks {
     static func main() throws {
         let source = URL(fileURLWithPath: CommandLine.arguments[1])
         let destination = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
-        var profile = try Profile.parse(String(contentsOf: source))
+        let repository = URL(fileURLWithPath: CommandLine.arguments[3], isDirectory: true)
+        var publishedProfile = try Profile.parse(String(contentsOf: source))
         if source.lastPathComponent == "example.json" {
-            var fixture = profile.json
+            var fixture = publishedProfile.json
             fixture["client"] = "mac"
-            profile = Profile(json: fixture)
+            publishedProfile = Profile(json: fixture)
         }
+        _ = try ProfileValidation.profile(publishedProfile.json)
+        // Migration/state fixtures have four modes even when the live feed has additional modes.
+        var baseline = publishedProfile.json
+        baseline.removeValue(forKey: "extraXray")
+        let profile = Profile(json: baseline)
         precondition(Set(VPNProtocol.allCases.map(\.rawValue)) == ["VLESS_TCP", "HY2", "HY2_OBFS", "AWG"])
 
         // Migration must preserve current credentials and never reuse a retired relay.
@@ -62,7 +68,7 @@ struct ConfigChecks {
             if proto == .vlessTcp {
                 precondition(settings["port"] as? Int == profile.int("vless.tcpPort"))
                 precondition(settings["id"] as? String == profile.str("vless.uuid"))
-                precondition(settings["flow"] as? String == "xtls-rprx-vision")
+                precondition(settings["flow"] as? String == "xtls-rprx-vision-udp443")
                 precondition(stream["network"] as? String == "raw" && stream["security"] as? String == "reality")
                 precondition(stream["xhttpSettings"] == nil)
                 let reality = stream["realitySettings"] as! [String: Any]
@@ -94,7 +100,22 @@ struct ConfigChecks {
         precondition(awg.conf.contains("Endpoint = 192.0.2.8:\(profile.int("awg.port"))\n"))
         precondition(awg.address == profile.str("awg.address"))
         precondition(awg.mtu == profile.int("awg.mtu"))
+        let extras = publishedProfile.connections.filter { $0.builtin == nil }
+        precondition(extras.count == ((publishedProfile.json["extraXray"] as? [[String: Any]]) ?? []).count)
+        for connection in extras {
+            let config = Configs.xray(publishedProfile, connection)
+            let object = try JSONSerialization.jsonObject(with: Data(config.utf8)) as! [String: Any]
+            let proxy = (object["outbounds"] as! [[String: Any]])[0]
+            var expected = connection.outbound!
+            expected["tag"] = "proxy"
+            precondition(NSDictionary(dictionary: proxy).isEqual(to: expected))
+            let file = destination.appendingPathComponent("published-\(connection.id).json")
+            try config.write(to: file, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        }
         print("Protocol, credential, pin and legacy migration checks passed")
-        try UpdateChecks.run(profile: profile, output: destination, source: source)
+        print("Loaded profile: \(publishedProfile.connections.count) modes, \(extras.count) additional Xray configs generated")
+        try UpdateChecks.run(profile: profile, publishedProfile: publishedProfile,
+                             output: destination, source: source, repository: repository)
     }
 }

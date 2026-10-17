@@ -91,6 +91,7 @@ class XrayVpnService : VpnService() {
             check(controller.isRunning) { "Ядро Xray не запустилось" }
             core = controller
             setState(STATE_UP)
+            goForeground(proto, started = true)
         } catch (e: Throwable) {
             Log.e(TAG, "Xray start failed: ${e.javaClass.simpleName}")
             stop("Не удалось запустить VPN. Проверьте профиль и разрешение VPN.")
@@ -143,7 +144,7 @@ class XrayVpnService : VpnService() {
         )
     }
 
-    private fun goForeground(proto: Protocol) {
+    private fun goForeground(proto: Protocol, started: Boolean = false) {
         val nm = getSystemService(NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             nm.createNotificationChannel(NotificationChannel(CHANNEL, "VPN", NotificationManager.IMPORTANCE_LOW))
@@ -157,7 +158,8 @@ class XrayVpnService : VpnService() {
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentTitle(getString(R.string.app_name))
-            .setContentText("Подключено: ${proto.title}")
+            .setContentText(if (started) "Туннель запущен: ${proto.title}" else "Запуск: ${proto.title}")
+            .setOnlyAlertOnce(true)
             .setOngoing(true)
             .setContentIntent(open)
             .addAction(0, "Отключить", stop)

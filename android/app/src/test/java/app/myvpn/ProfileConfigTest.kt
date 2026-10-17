@@ -50,12 +50,15 @@ class ProfileConfigTest {
         val settings = config.getJSONObject("settings")
         val stream = config.getJSONObject("streamSettings")
         assertEquals("vless", config.getString("protocol"))
-        assertEquals("xtls-rprx-vision", settings.getString("flow"))
+        // Внешний транспорт остаётся TCP/REALITY, UDP/443 внутри туннеля разрешён.
+        assertEquals("xtls-rprx-vision-udp443", settings.getString("flow"))
         assertEquals(443, settings.getInt("port"))
         assertEquals("raw", stream.getString("network"))
         assertEquals("reality", stream.getString("security"))
         assertEquals("example-public-key", stream.getJSONObject("realitySettings").getString("publicKey"))
         assertFalse(stream.has("xhttpSettings"))
+        val inbounds = JSONObject(XrayConfig.build(sample(), Protocol.VLESS_TCP, 10808)).getJSONArray("inbounds")
+        assertTrue(inbounds.getJSONObject(1).getJSONObject("settings").getBoolean("udp"))
     }
 
     @Test fun plainHysteriaKeepsCertificatePinWithoutSalamander() {

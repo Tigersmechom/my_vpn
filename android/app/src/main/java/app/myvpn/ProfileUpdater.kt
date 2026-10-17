@@ -5,8 +5,13 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URL
+import java.io.IOException
+import java.net.SocketTimeoutException
 import java.security.GeneralSecurityException
 import java.util.UUID
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -86,43 +91,69 @@ private fun exactRevision(obj: JSONObject, key: String): Int {
 }
 
 object ProfileUpdater {
+    private val deadlines = Executors.newSingleThreadScheduledExecutor { task ->
+        Thread(task, "vpn-update-deadline").apply { isDaemon = true }
+    }
+
     suspend fun refresh(store: Store): Boolean = withContext(Dispatchers.IO) {
         val bootstrap = store.bootstrap ?: error("Обновления не настроены в этой сборке")
         // Приложение исключено из Xray VPN, поэтому используем его локальный SOCKS.
         val status = VpnController.status.value
         val socksPort = status.socksPort.takeIf { status.state == VpnState.UP && status.protocol?.usesXray == true } ?: 0
-        val bytes = fetch(bootstrap.url, socksPort)
-        val update = UpdateEnvelope.decode(bytes, bootstrap, store.appliedRevision)
+        val update = download(bootstrap, store.appliedRevision, socksPort)
         store.applyUpdate(update)
     }
 
+    /** При недоступном старом сервере пробуем HTTPS напрямую, не останавливая туннель. */
+    internal fun download(bootstrap: UpdateBootstrap, appliedRevision: Int, socksPort: Int,
+        fetcher: (String, Int) -> ByteArray = ::fetch): ProfileUpdate {
+        val bytes = try {
+            try {
+                fetcher(bootstrap.url, socksPort)
+            } catch (e: IOException) {
+                if (socksPort <= 0) throw e
+                fetcher(bootstrap.url, 0)
+            }
+        } catch (_: IOException) {
+            throw IllegalStateException("Не удалось загрузить обновление. Проверьте интернет и повторите.")
+        }
+        // Ошибки подписи, формата и откат ревизии не вызывают сетевых повторов.
+        return UpdateEnvelope.decode(bytes, bootstrap, appliedRevision)
+    }
+
     private fun fetch(url: String, socksPort: Int): ByteArray {
+        val proxy = if (socksPort > 0) java.net.Proxy(java.net.Proxy.Type.SOCKS, java.net.InetSocketAddress("127.0.0.1", socksPort))
+            else java.net.Proxy.NO_PROXY
+        val connection = URL(url).openConnection(proxy) as HttpsURLConnection
+        val expired = AtomicBoolean(false)
+        val deadline = deadlines.schedule({
+            expired.set(true)
+            connection.disconnect()
+        }, 20, TimeUnit.SECONDS)
         try {
-            val proxy = if (socksPort > 0) java.net.Proxy(java.net.Proxy.Type.SOCKS, java.net.InetSocketAddress("127.0.0.1", socksPort))
-                else java.net.Proxy.NO_PROXY
-            val connection = URL(url).openConnection(proxy) as HttpsURLConnection
-            connection.connectTimeout = 10_000
-            connection.readTimeout = 15_000
+            connection.connectTimeout = 6_000
+            connection.readTimeout = 8_000
             connection.instanceFollowRedirects = false
             connection.useCaches = false
             connection.setRequestProperty("Accept", "application/json")
-            return try {
-                require(connection.responseCode == 200) { "Сервер обновлений временно недоступен" }
-                require(connection.contentLengthLong <= MAX_UPDATE_BYTES) { "Обновление слишком большое" }
-                connection.inputStream.use { input ->
-                    val output = java.io.ByteArrayOutputStream()
-                    val buffer = ByteArray(8192)
-                    while (true) {
-                        val count = input.read(buffer)
-                        if (count < 0) break
-                        require(output.size() + count <= MAX_UPDATE_BYTES) { "Обновление слишком большое" }
-                        output.write(buffer, 0, count)
-                    }
-                    output.toByteArray()
+            connection.setRequestProperty("Cache-Control", "no-cache")
+            require(connection.responseCode == 200) { "Сервер обновлений временно недоступен" }
+            require(connection.contentLengthLong <= MAX_UPDATE_BYTES) { "Обновление слишком большое" }
+            return connection.inputStream.use { input ->
+                val output = java.io.ByteArrayOutputStream()
+                val buffer = ByteArray(8192)
+                while (true) {
+                    if (expired.get()) throw SocketTimeoutException()
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    require(output.size() + count <= MAX_UPDATE_BYTES) { "Обновление слишком большое" }
+                    output.write(buffer, 0, count)
                 }
-            } finally { connection.disconnect() }
-        } catch (e: java.io.IOException) {
-            throw IllegalStateException("Не удалось загрузить обновление. Проверьте интернет и повторите.")
+                output.toByteArray()
+            }
+        } finally {
+            deadline.cancel(false)
+            connection.disconnect()
         }
     }
 }

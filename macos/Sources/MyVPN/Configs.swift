@@ -65,7 +65,8 @@ enum Configs {
             "port": p.int("vless.tcpPort"),
             "id": p.str("vless.uuid"),
             "encryption": "none",
-            "flow": "xtls-rprx-vision",
+            // Google и другие приложения могут требовать QUIC на UDP 443.
+            "flow": "xtls-rprx-vision-udp443",
         ]
 
         let fp = p.str("vless.fingerprint")

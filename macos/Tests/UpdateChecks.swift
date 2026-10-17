@@ -2,7 +2,8 @@ import Foundation
 import CryptoKit
 
 enum UpdateChecks {
-    static func run(profile: Profile, output: URL, source: URL) throws {
+    static func run(profile: Profile, publishedProfile: Profile, output: URL, source: URL, repository: URL) throws {
+        precondition(profile.connections.count == VPNProtocol.allCases.count)
         let key = Data((0..<32).map(UInt8.init))
         let bootstrap = UpdateBootstrap(client: "mac", url: URL(string: "https://example.com/mac.json")!, key: key, minRevision: 1)
         func encoded(_ profileJSON: [String: Any], revision: Int = 1, client: String = "mac", innerRevision: Int? = nil) throws -> Data {
@@ -55,8 +56,7 @@ enum UpdateChecks {
         extended["extraXray"] = [extra]
         let update = try RemoteUpdates.verify(encoded(extended, revision: 2), bootstrap: bootstrap, highestRevision: 1)
         precondition(update.profile.connections.count == 5)
-        let repositoryRoot = source.deletingLastPathComponent().deletingLastPathComponent()
-        try RemoteUpdates.validateExtraConfigs(update.profile, executable: repositoryRoot.appendingPathComponent("macos/vendor/xray"))
+        try RemoteUpdates.validateExtraConfigs(update.profile, executable: repository.appendingPathComponent("macos/vendor/xray"))
         let custom = update.profile.connections.last!
         precondition(custom.id == "custom-tls" && custom.usesXray && custom.builtin == nil)
         let config = Configs.xray(update.profile, custom)
@@ -110,14 +110,24 @@ enum UpdateChecks {
         precondition(store.highestRevision == 2 && store.profile.connections.count == 5)
 
         // Python publisher -> real CryptoKit interoperability, when the private bootstrap exists.
-        let repository = source.deletingLastPathComponent().deletingLastPathComponent()
         let bootstrapURL = repository.appendingPathComponent("config/mac-update.json")
         let envelopeURL = repository.appendingPathComponent("updates/mac.json")
         if source.lastPathComponent == "mac.json", FileManager.default.fileExists(atPath: bootstrapURL.path), FileManager.default.fileExists(atPath: envelopeURL.path) {
             let realBootstrap = try UpdateBootstrap.parse(Data(contentsOf: bootstrapURL))
             let realUpdate = try RemoteUpdates.verify(Data(contentsOf: envelopeURL), bootstrap: realBootstrap, highestRevision: 0)
-            precondition(realUpdate.profile.serialized() == profile.serialized())
-            print("Python publisher / CryptoKit interoperability passed")
+            precondition(realUpdate.profile.serialized() == publishedProfile.serialized())
+            try RemoteUpdates.validateExtraConfigs(realUpdate.profile, executable: repository.appendingPathComponent("macos/vendor/xray"))
+            let realSuite = "app.myvpn.published-check.\(UUID().uuidString)"
+            let realDefaults = UserDefaults(suiteName: realSuite)!
+            defer { realDefaults.removePersistentDomain(forName: realSuite) }
+            let realStore = Store(defaults: realDefaults)
+            try realStore.applyRemote(realUpdate.profile, revision: realUpdate.revision)
+            precondition(realStore.profile.serialized() == publishedProfile.serialized())
+            for connection in publishedProfile.connections {
+                realStore.selectedConnection = connection
+                precondition(Store(defaults: realDefaults).selectedConnection.id == connection.id)
+            }
+            print("Python publisher / CryptoKit interoperability passed for the complete published profile")
         }
         print("Update authentication, rollback, atomic state and custom-mode checks passed")
     }

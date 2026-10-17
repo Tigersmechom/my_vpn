@@ -23,9 +23,9 @@ with tempfile.TemporaryDirectory(prefix="myvpn-config-check-") as directory:
         str(root / "Tests/UpdateChecks.swift"),
         "-o", str(temporary / "check"),
     ], check=True)
-    subprocess.run([str(temporary / "check"), str(profile), directory], check=True)
-    for protocol in ["VLESS_TCP", "HY2", "HY2_OBFS", "custom-tls"]:
-        config = temporary / f"{protocol}.json"
+    subprocess.run([str(temporary / "check"), str(profile), directory, str(root.parent)], check=True)
+    for config in sorted(temporary.glob("*.json")):
+        protocol = config.stem
         # Match the helper's system-plist extraction and its TUN wrapper.
         outbounds = subprocess.check_output(["/usr/bin/plutil", "-extract", "outbounds", "json", "-o", "-", str(config)])
         routing = subprocess.check_output(["/usr/bin/plutil", "-extract", "routing", "json", "-o", "-", str(config)])

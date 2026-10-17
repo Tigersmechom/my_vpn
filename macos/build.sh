@@ -11,7 +11,12 @@ AWG_GO_REF=v3.1.20260828
 AWG_TOOLS_REF=v1.0.20260618-2
 
 VENDOR="$PWD/vendor"
-APP="$PWD/build/My VPN.app"
+OUTPUT_APP="$PWD/build/My VPN.app"
+# Desktop/iCloud FileProvider может немедленно вернуть FinderInfo после xattr -c.
+# Подписываем bundle вне синхронизируемой папки, затем копируем без этих атрибутов.
+BUNDLE_STAGE="$(mktemp -d "${TMPDIR:-/tmp}/myvpn-app.XXXXXX")"
+trap 'rm -rf "$BUNDLE_STAGE"' EXIT
+APP="$BUNDLE_STAGE/My VPN.app"
 mkdir -p "$VENDOR"
 export PATH="/opt/homebrew/bin:$PATH"
 
@@ -78,8 +83,8 @@ cat >"$APP/Contents/Info.plist" <<'EOF'
   <key>CFBundleExecutable</key><string>MyVPN</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.1.0</string>
-  <key>CFBundleVersion</key><string>2</string>
+  <key>CFBundleShortVersionString</key><string>1.2.0</string>
+  <key>CFBundleVersion</key><string>3</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict>
@@ -90,4 +95,6 @@ EOF
 xattr -cr "$APP"
 codesign --force --deep --sign - "$APP"
 codesign --verify --deep --strict "$APP"
-step "Готово: $APP"
+rm -rf "$OUTPUT_APP"
+ditto --norsrc --noextattr --noqtn "$APP" "$OUTPUT_APP"
+step "Готово: $OUTPUT_APP"

@@ -234,6 +234,60 @@ class ServerIntegrationTests(unittest.TestCase):
             self.assertIn("-format", call)
             self.assertEqual(call[call.index("-format") + 1], "json")
 
+    def make_extra_stub(self):
+        script = self.root / "usr/local/lib/myvpn/extra_protocols.py"
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text("""import json, os, sys
+from pathlib import Path
+root = Path(os.environ["MYVPN_ROOT"])
+with open(os.environ["MYVPN_TEST_LOG"], "a") as file:
+    file.write(json.dumps(["extra_protocols", *sys.argv[1:],
+                          sorted(p.stem for p in (root / "etc/myvpn/clients").glob("*.env"))]) + "\\n")
+""")
+        script.chmod(0o755)
+        return script
+
+    def test_render_does_not_enable_unconfigured_optional_addon(self):
+        self.make_client()
+        self.make_extra_stub()
+        self.run_ctl("render")
+        self.assertFalse(any(call[0] == "extra_protocols" for call in self.calls()))
+        self.assertFalse((self.state / "extra-protocols.json").exists())
+
+    def test_render_reconciles_configured_addon_with_disposable_root(self):
+        self.make_client()
+        self.make_extra_stub()
+        state = self.state / "extra-protocols.json"
+        state.write_text('{"fixture":true}')
+        state.chmod(0o600)
+        self.run_ctl("render")
+        expected = ["extra_protocols", "--root", str(self.root.resolve()), "install", ["phone"]]
+        self.assertIn(expected, self.calls())
+        self.assertLess(self.calls().index(expected), self.calls().index(["systemctl", "restart", "xray"]))
+        self.assertNotIn("extraXray", self.profile("phone"))
+
+    def test_remove_reconciles_addon_after_client_deleted_including_last(self):
+        self.make_client()
+        self.make_client("laptop", 3)
+        self.make_extra_stub()
+        state = self.state / "extra-protocols.json"
+        state.write_text('{"fixture":true}')
+        state.chmod(0o600)
+        self.run_ctl("remove", "phone")
+        self.assertIn(["extra_protocols", "--root", str(self.root.resolve()), "install", ["laptop"]], self.calls())
+        self.run_ctl("remove", "laptop")
+        self.assertIn(["extra_protocols", "--root", str(self.root.resolve()), "install", []], self.calls())
+
+    def test_configured_addon_without_manager_fails_before_services_or_removal(self):
+        self.make_client()
+        state = self.state / "extra-protocols.json"
+        state.write_text('{"fixture":true}')
+        state.chmod(0o600)
+        self.run_ctl("render", ok=False)
+        self.run_ctl("remove", "phone", ok=False)
+        self.assertTrue((self.clients / "phone.env").is_file())
+        self.assertFalse(self.calls())
+
     def test_render_rejects_invalid_config_before_restarting_xray(self):
         self.make_client()
         original = '{"existing": "configuration"}\n'

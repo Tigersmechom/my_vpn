@@ -97,7 +97,9 @@ object XrayConfig {
             .put("port", port)
             .put("id", p.str("vless.uuid"))
             .put("encryption", "none")
-        user.put("flow", "xtls-rprx-vision")
+        // Разрешаем HTTP/3 (UDP/443) внутри TCP-туннеля. Xray удаляет суффикс
+        // -udp443 перед передачей flow серверу, поэтому серверный Vision не меняется.
+        user.put("flow", "xtls-rprx-vision-udp443")
 
         val stream = JSONObject()
             .put("network", "raw")
