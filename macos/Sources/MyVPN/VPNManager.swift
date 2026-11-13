@@ -10,6 +10,8 @@ final class VPNManager: ObservableObject {
     @Published var state: VPNState = .down
     @Published var activeProtocol: VPNConnection?
     @Published var activeServerHost: String?
+    @Published var activeServerTitle: String?
+    @Published var selectedServerId: String
     @Published var selected: VPNConnection
     @Published var since: Date?
     @Published var error: String?
@@ -19,10 +21,12 @@ final class VPNManager: ObservableObject {
     @Published var configurationMessage: String?
     private let updateBootstrap = UpdateBootstrap.bundled
 
-    var connections: [VPNConnection] { store.profile.connections }
+    var connections: [VPNConnection] { store.selectedServer.profile.connections }
+    var servers: [VPNServer] { store.profile.servers }
     var canUpdateConfiguration: Bool { updateBootstrap != nil }
 
     func reloadProfileChoices() {
+        selectedServerId = store.selectedServer.id
         selected = store.selectedConnection
         results = store.results()
     }
@@ -55,6 +59,7 @@ final class VPNManager: ObservableObject {
     }
 
     init() {
+        selectedServerId = store.selectedServer.id
         selected = store.selectedConnection
         results = store.results()
         Task { await refresh() }
@@ -91,20 +96,27 @@ final class VPNManager: ObservableObject {
         if state != .down { Task { await connect() } }
     }
 
+    func selectServer(_ id: String) {
+        guard state == .down, let server = servers.first(where: { $0.id == id }) else { return }
+        store.selectedServer = server
+        reloadProfileChoices()
+    }
+
     func toggle() {
         Task { state == .down ? await connect() : await disconnect() }
     }
 
     func connect() async {
         guard state != .connecting else { return }
-        let profile = store.profile
-        let proto = profile.connections.first { $0.id == selected.id } ?? VPNConnection(.vlessTcp)
+        let profile = store.selectedServer.profile
+        let proto = profile.connections.first { $0.id == selected.id } ?? profile.connections[0]
         selected = proto
         store.selectedConnection = proto
         error = nil
         state = .connecting
         activeProtocol = proto
         activeServerHost = profile.host
+        activeServerTitle = store.selectedServer.title
         do {
             let dir = runDir
             try await background {
@@ -145,7 +157,9 @@ final class VPNManager: ObservableObject {
     }
 
     func addResult(_ r: SpeedResult) {
-        results.insert(r, at: 0)
+        var tagged = r
+        tagged.serverId = selectedServerId
+        results.insert(tagged, at: 0)
         store.saveResults(results)
     }
 

@@ -96,30 +96,31 @@ enum RemoteUpdates {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
                                                  attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: directory) }
-        for connection in profile.connections where connection.builtin == nil {
-            let file = directory.appendingPathComponent("config.json")
-            try Configs.xray(profile, connection).write(to: file, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
-            let process = Process()
-            process.executableURL = executable
-            process.arguments = ["run", "-test", "-c", file.path]
-            process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
-            do { try process.run() } catch { throw VPNError("Не удалось проверить режим Xray; обновите приложение") }
-            let deadline = Date().addingTimeInterval(5)
-            while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
-            if process.isRunning {
-                kill(process.processIdentifier, SIGKILL)
+        for server in profile.servers {
+            for connection in server.profile.connections where connection.builtin == nil {
+                let file = directory.appendingPathComponent("config.json")
+                try Configs.xray(server.profile, connection).write(to: file, atomically: true, encoding: .utf8)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+                let process = Process()
+                process.executableURL = executable
+                process.arguments = ["run", "-test", "-c", file.path]
+                process.standardOutput = FileHandle.nullDevice
+                process.standardError = FileHandle.nullDevice
+                do { try process.run() } catch { throw VPNError("Не удалось проверить режим Xray; обновите приложение") }
+                let deadline = Date().addingTimeInterval(5)
+                while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
+                if process.isRunning {
+                    kill(process.processIdentifier, SIGKILL)
+                    process.waitUntilExit()
+                    throw VPNError("Проверка режима Xray превысила время ожидания")
+                }
                 process.waitUntilExit()
-                throw VPNError("Проверка режима Xray превысила время ожидания")
-            }
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else {
-                throw VPNError("Дополнительный режим несовместим с ядром Xray; проверьте профиль или обновите приложение")
+                guard process.terminationStatus == 0 else {
+                    throw VPNError("Дополнительный режим несовместим с ядром Xray; проверьте профиль или обновите приложение")
+                }
             }
         }
     }
-
     static func fetch(bootstrap: UpdateBootstrap, highestRevision: Int) async throws -> VerifiedUpdate {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 15
@@ -141,7 +142,7 @@ enum RemoteUpdates {
                 data.append(byte)
             }
             let update = try verify(data, bootstrap: bootstrap, highestRevision: highestRevision)
-            if update.revision > highestRevision, update.profile.connections.contains(where: { $0.builtin == nil }) {
+            if update.revision > highestRevision, update.profile.servers.contains(where: { $0.profile.connections.contains(where: { $0.builtin == nil }) }) {
                 guard let executable = Bundle.main.url(forResource: "xray", withExtension: nil) else {
                     throw VPNError("Не найдено ядро Xray; обновите приложение")
                 }

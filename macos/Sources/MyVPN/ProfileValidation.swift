@@ -47,7 +47,38 @@ enum ProfileValidation {
         }
         for key in ["h1", "h2", "h3", "h4"] { try require("awg.\(key)") }
         try extras(json["extraXray"])
+        try catalog(json)
         return p
+    }
+
+    static func catalog(_ json: [String: Any]) throws {
+        if let raw = json["enabledProtocols"] {
+            guard let ids = raw as? [String], !ids.isEmpty, ids.count <= VPNProtocol.allCases.count,
+                  Set(ids).count == ids.count, ids.allSatisfy({ VPNProtocol(rawValue: $0) != nil }) else {
+                throw VPNError("Некорректный список протоколов сервера")
+            }
+        }
+        func title(_ value: Any?) -> Bool {
+            guard let text = value as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  text.count <= 80, !text.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else { return false }
+            return true
+        }
+        if let label = json["serverTitle"], !title(label) { throw VPNError("Некорректное название сервера") }
+        guard let raw = json["additionalServers"] else { return }
+        guard let entries = raw as? [[String: Any]], entries.count <= 8 else {
+            throw VPNError("Слишком много серверов или некорректный список")
+        }
+        var ids = Set(["primary"])
+        for entry in entries {
+            guard Set(entry.keys) == ["id", "title", "profile"], let id = entry["id"] as? String,
+                  id.range(of: "^[A-Za-z0-9_-]{1,32}$", options: .regularExpression) != nil,
+                  ids.insert(id).inserted, title(entry["title"]),
+                  let candidate = entry["profile"] as? [String: Any], candidate["additionalServers"] == nil,
+                  candidate["client"] as? String == json["client"] as? String else {
+                throw VPNError("Некорректный дополнительный сервер")
+            }
+            _ = try profile(candidate)
+        }
     }
 
     static func extras(_ value: Any?) throws {

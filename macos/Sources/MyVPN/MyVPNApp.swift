@@ -14,6 +14,11 @@ struct MyVPNApp: App {
         }
         .windowResizability(.contentSize)
 
+        Window("Рабочий стол США", id: "desktop-us") {
+            RemoteDesktopView()
+        }
+        .defaultSize(width: 1200, height: 820)
+
         MenuBarExtra {
             MenuContent().environmentObject(vpn)
         } label: {
@@ -36,11 +41,15 @@ private struct MenuContent: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        Text(vpn.state == .up ? "Подключено · \(vpn.activeProtocol?.title ?? "")"
+        Text(vpn.state == .up ? "Туннель запущен · \(vpn.activeProtocol?.title ?? "")"
              : vpn.state == .connecting ? "Подключение…" : "Отключено")
         Button(vpn.state == .down ? "Подключить" : "Отключить") { vpn.toggle() }
             .disabled(vpn.state == .connecting || !vpn.helperReady)
         Divider()
+        Picker("Сервер", selection: Binding(get: { vpn.selectedServerId }, set: { vpn.selectServer($0) })) {
+            ForEach(vpn.servers) { Text($0.title).tag($0.id) }
+        }
+        .disabled(vpn.state != .down)
         Picker("Протокол", selection: Binding(get: { vpn.selected }, set: { vpn.select($0) })) {
             ForEach(vpn.connections) { Text($0.title).tag($0) }
         }
@@ -49,6 +58,7 @@ private struct MenuContent: View {
             openWindow(id: "main")
             NSApp.activate(ignoringOtherApps: true)
         }
+        Button("Рабочий стол США") { openWindow(id: "desktop-us"); NSApp.activate(ignoringOtherApps: true) }
         Button("Выход") { NSApp.terminate(nil) }.keyboardShortcut("q")
     }
 }

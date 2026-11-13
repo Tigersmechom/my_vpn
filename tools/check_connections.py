@@ -65,6 +65,9 @@ def dns_probe(port):
 
 def candidates(profile):
     for name, mode in [("VLESS TCP", "vless"), ("Hysteria 2", "hy2"), ("Hysteria 2 Salamander", "hy2-obfs")]:
+        protocol_id = {"vless": "VLESS_TCP", "hy2": "HY2", "hy2-obfs": "HY2_OBFS"}[mode]
+        if protocol_id not in profile.get("enabledProtocols", ["VLESS_TCP", "HY2", "HY2_OBFS", "AWG"]):
+            continue
         config = export.xray_config(profile, mode)
         if isinstance(config, str):
             config = json.loads(config)

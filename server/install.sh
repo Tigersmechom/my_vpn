@@ -12,6 +12,9 @@
 #   AWG_GO_REF        — тег amneziawg-go
 #   AWG_TOOLS_REF     — тег amneziawg-tools
 #   GO_VERSION        — версия Go для сборки AmneziaWG
+#   ENABLE_VLESS      — 0 для сервера только Hysteria 2 / AmneziaWG (по умолчанию 1)
+#   DEFAULT_CLIENTS   — имена первоначальных клиентов через пробел (android mac)
+#   USE_PREBUILT_CORES — 1: использовать заранее проверенные установленные ядра
 set -euo pipefail
 umask 077
 
@@ -71,6 +74,12 @@ net.core.netdev_max_backlog = 16384
 EOF
 sysctl --system >/dev/null
 
+if [[ ${USE_PREBUILT_CORES:-0} == 1 ]]; then
+  /usr/local/bin/xray version | grep -F "Xray ${XRAY_VERSION#v} " >/dev/null || die "неверная версия подготовленного Xray"
+  /usr/bin/amneziawg-go --version | grep -F "$AWG_GO_REF" >/dev/null || die "неверная версия подготовленного AmneziaWG"
+  awg --version | grep -F "$AWG_TOOLS_REF" >/dev/null || die "неверная версия подготовленных AWG tools"
+  command -v awg-quick >/dev/null || die "нет awg-quick"
+else
 log "Xray $XRAY_VERSION"
 if ! /usr/local/bin/xray version 2>/dev/null | grep -q "Xray ${XRAY_VERSION#v} "; then
   bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install --version "$XRAY_VERSION"
@@ -107,6 +116,7 @@ if [[ "$(cat "$BUILD/awg-tools.ref" 2>/dev/null)" != "$AWG_TOOLS_REF" ]]; then
   echo "$AWG_TOOLS_REF" >"$BUILD/awg-tools.ref"
 fi
 awg --version || true
+fi
 
 log "Ключи и параметры сервера"
 mkdir -p "$STATE_DIR/clients"
@@ -199,7 +209,7 @@ s = os.lstat(path)
 if not stat.S_ISREG(s.st_mode) or s.st_uid != 0 or stat.S_IMODE(s.st_mode) & 0o077:
     sys.exit("server.env должен быть обычным файлом root с правами 600")
 seen = set()
-allowed = set("PUBLIC_HOST WAN_IF REALITY_SNI REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY REALITY_SHORT_ID REALITY_FINGERPRINT VLESS_TCP_PORT AWG_PORT AWG_NET AWG_SERVER_PRIVATE_KEY AWG_SERVER_PUBLIC_KEY AWG_JC AWG_JMIN AWG_JMAX AWG_S1 AWG_S2 AWG_S3 AWG_S4 AWG_H1 AWG_H2 AWG_H3 AWG_H4 AWG_I1 CLIENT_DNS HY2_PORT HY2_OBFS_PORT HY2_SNI HY2_OBFS_PASSWORD HY2_CERT HY2_KEY HY2_PIN VLESS_XHTTP_PORT XHTTP_PATH WG_PORT WG_NET WG_SERVER_PRIVATE_KEY WG_SERVER_PUBLIC_KEY RELAY_HOST".split())
+allowed = set("PUBLIC_HOST WAN_IF REALITY_SNI REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY REALITY_SHORT_ID REALITY_FINGERPRINT VLESS_TCP_PORT ENABLE_VLESS AWG_PORT AWG_NET AWG_SERVER_PRIVATE_KEY AWG_SERVER_PUBLIC_KEY AWG_JC AWG_JMIN AWG_JMAX AWG_S1 AWG_S2 AWG_S3 AWG_S4 AWG_H1 AWG_H2 AWG_H3 AWG_H4 AWG_I1 CLIENT_DNS HY2_PORT HY2_OBFS_PORT HY2_SNI HY2_OBFS_PASSWORD HY2_CERT HY2_KEY HY2_PIN VLESS_XHTTP_PORT XHTTP_PATH WG_PORT WG_NET WG_SERVER_PRIVATE_KEY WG_SERVER_PUBLIC_KEY RELAY_HOST".split())
 with open(path) as f:
     for line in f:
         line = line.rstrip("\n")
@@ -211,6 +221,8 @@ PYVALIDATE
 
 # Hysteria2 — добавлен позже, поэтому дописываем недостающие параметры и в существующую установку.
 ensure_var() { grep -q "^$1=" "$SERVER_ENV" || echo "$1=$2" >>"$SERVER_ENV"; }
+[[ ${ENABLE_VLESS:-1} == 0 || ${ENABLE_VLESS:-1} == 1 ]] || die "ENABLE_VLESS должен быть 0 или 1"
+ensure_var ENABLE_VLESS "${ENABLE_VLESS:-1}"
 ensure_var HY2_PORT 443
 ensure_var HY2_OBFS_PORT "$(shuf -i 20000-29999 -n 1)"
 ensure_var HY2_SNI "'www.bing.com'"
@@ -249,9 +261,13 @@ if [[ -f "$SCRIPT_DIR/extra_protocols.py" ]]; then
 fi
 
 if ! compgen -G "$STATE_DIR/clients/*.env" >/dev/null; then
-  log "Клиенты по умолчанию: android, mac"
-  vpnctl add android --no-render
-  vpnctl add mac --no-render
+  log "Первоначальные клиенты"
+  read -ra initial_clients <<<"${DEFAULT_CLIENTS:-android mac}"
+  ((${#initial_clients[@]} > 0)) || die "нужен хотя бы один клиент"
+  for initial_client in "${initial_clients[@]}"; do
+    [[ $initial_client =~ ^[A-Za-z0-9_-]{1,32}$ ]] || die "неверное имя первоначального клиента"
+    vpnctl add "$initial_client" --no-render
+  done
 fi
 
 log "Конфиги и сервисы"
@@ -260,7 +276,7 @@ vpnctl migrate
 if systemctl is-active -q ufw; then
   # shellcheck disable=SC1090
   source "$SERVER_ENV"
-  ufw allow "$VLESS_TCP_PORT/tcp"
+  [[ ${ENABLE_VLESS:-1} == 0 ]] || ufw allow "$VLESS_TCP_PORT/tcp"
   ufw allow "$AWG_PORT/udp"
   ufw allow "$HY2_PORT/udp" && ufw allow "$HY2_OBFS_PORT/udp"
 fi

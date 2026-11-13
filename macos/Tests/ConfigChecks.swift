@@ -13,6 +13,7 @@ struct ConfigChecks {
             publishedProfile = Profile(json: fixture)
         }
         _ = try ProfileValidation.profile(publishedProfile.json)
+        try RegionChecks.run(profile: publishedProfile)
         // Migration/state fixtures have four modes even when the live feed has additional modes.
         var baseline = publishedProfile.json
         baseline.removeValue(forKey: "extraXray")
@@ -100,6 +101,17 @@ struct ConfigChecks {
         precondition(awg.conf.contains("Endpoint = 192.0.2.8:\(profile.int("awg.port"))\n"))
         precondition(awg.address == profile.str("awg.address"))
         precondition(awg.mtu == profile.int("awg.mtu"))
+        for server in publishedProfile.servers.dropFirst() {
+            for connection in server.profile.connections where connection.usesXray {
+                let config = Configs.xray(server.profile, connection)
+                let object = try JSONSerialization.jsonObject(with: Data(config.utf8)) as! [String: Any]
+                let proxy = (object["outbounds"] as! [[String: Any]])[0]
+                precondition((proxy["settings"] as! [String: Any])["address"] as? String == server.profile.host)
+                let file = destination.appendingPathComponent("server-\(server.id)-\(connection.id).json")
+                try config.write(to: file, atomically: true, encoding: .utf8)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+            }
+        }
         let extras = publishedProfile.connections.filter { $0.builtin == nil }
         precondition(extras.count == ((publishedProfile.json["extraXray"] as? [[String: Any]]) ?? []).count)
         for connection in extras {

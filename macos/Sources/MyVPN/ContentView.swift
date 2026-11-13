@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var vpn: VPNManager
+    @Environment(\.openWindow) private var openWindow
     @State private var showSettings = false
     @State private var testing = false
     @State private var testStep = ""
@@ -12,6 +13,12 @@ struct ContentView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 if !vpn.helperReady { helperBanner }
+                section("Сервер")
+                Picker("Страна", selection: Binding(get: { vpn.selectedServerId }, set: { vpn.selectServer($0) })) {
+                    ForEach(vpn.servers) { server in Text(server.title).tag(server.id) }
+                }
+                .pickerStyle(.segmented)
+                .disabled(vpn.state != .down)
                 statusCard
                 section("Протокол")
                 VStack(spacing: 6) {
@@ -35,6 +42,7 @@ struct ContentView: View {
         }
         .frame(width: 520, height: 820)
         .toolbar {
+            Button { openWindow(id: "desktop-us") } label: { Label("Рабочий стол США", systemImage: "display") }
             Button { showSettings = true } label: { Label("Настройки сервера", systemImage: "gearshape") }
         }
         .sheet(isPresented: $showSettings, onDismiss: { vpn.reloadProfileChoices() }) { SettingsView(store: vpn.store) }
@@ -78,12 +86,12 @@ struct ContentView: View {
             .buttonStyle(.plain)
             .disabled(vpn.state == .connecting || !vpn.helperReady)
 
-            Text(vpn.state == .up ? "Подключено" : vpn.state == .connecting ? "Подключение…" : "Отключено")
+            Text(vpn.state == .up ? "Туннель запущен" : vpn.state == .connecting ? "Подключение…" : "Отключено")
                 .font(.title2.weight(.semibold))
             TimelineView(.periodic(from: .now, by: 1)) { ctx in
                 Text(details(now: ctx.date)).font(.callout)
             }
-            Text("Сервер \(vpn.state == .down ? vpn.store.profile.host : (vpn.activeServerHost ?? vpn.store.profile.host))")
+            Text("\(vpn.state == .down ? vpn.store.selectedServer.title : (vpn.activeServerTitle ?? vpn.store.selectedServer.title)) · \(vpn.state == .down ? vpn.store.selectedServer.profile.host : (vpn.activeServerHost ?? vpn.store.selectedServer.profile.host))")
                 .font(.caption).foregroundStyle(.secondary)
             if let e = vpn.error {
                 Text(e).font(.caption).foregroundStyle(.red).multilineTextAlignment(.center).textSelection(.enabled)
@@ -275,7 +283,7 @@ struct SettingsView: View {
                 Spacer()
                 Button("Отмена") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("Сохранить") {
-                    store.profile = (importedProfile ?? store.profile).with(values)
+                    store.editingProfile = (importedProfile ?? store.editingProfile).with(values)
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
@@ -283,12 +291,12 @@ struct SettingsView: View {
             .padding()
         }
         .frame(width: 560, height: 680)
-        .onAppear { values = Self.values(of: store.profile) }
+        .onAppear { values = Self.values(of: store.editingProfile) }
         .confirmationDialog("Сбросить настройки?", isPresented: $confirmReset) {
             Button("Сбросить", role: .destructive) {
                 store.resetProfile()
                 importedProfile = nil
-                values = Self.values(of: store.resetTarget)
+                values = Self.values(of: store.editingProfile)
                 message = "Восстановлена последняя загруженная конфигурация"
             }
         } message: {

@@ -168,6 +168,16 @@ class ServerIntegrationTests(unittest.TestCase):
     def profile(self, name):
         return json.loads(self.run_ctl("profile", name).stdout)
 
+    def test_udp_only_server_has_no_vless_listener(self):
+        self.server["ENABLE_VLESS"] = "0"
+        self.write_env(self.state / "server.env", self.server)
+        self.make_client("mac")
+        self.run_ctl("render")
+        config = json.loads(self.xray_config.read_text())
+        self.assertEqual({entry["tag"] for entry in config["inbounds"]}, {"hysteria2", "hysteria2-obfs"})
+        self.assertIn("# mac", self.awg_config.read_text())
+        self.assertEqual(self.profile("mac")["enabledProtocols"], ["HY2", "HY2_OBFS", "AWG"])
+
     def test_independent_awg_device_does_not_restart_or_duplicate_xray(self):
         self.make_client("mac")
         self.run_ctl("render")

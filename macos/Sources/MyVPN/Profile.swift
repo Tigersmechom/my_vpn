@@ -100,6 +100,7 @@ struct Profile {
               obj["host"] != nil, obj["vless"] != nil
         else { throw VPNError("Это не профиль My VPN (нет полей host/vless)") }
         try ProfileValidation.extras(obj["extraXray"])
+        try ProfileValidation.catalog(obj)
         return Profile(json: obj)
     }
 }
@@ -204,11 +205,55 @@ struct VPNConnection: Identifiable, Hashable {
 
 extension Profile {
     var connections: [VPNConnection] {
-        VPNProtocol.allCases.map(VPNConnection.init) + ((json["extraXray"] as? [[String: Any]]) ?? []).compactMap { entry in
+        availableProtocols.map(VPNConnection.init) + ((json["extraXray"] as? [[String: Any]]) ?? []).compactMap { entry in
             guard let id = entry["id"] as? String,
                   let title = entry["title"] as? String,
                   let outbound = entry["outbound"] as? [String: Any] else { return nil }
             return VPNConnection(id: id, title: title, outbound: outbound)
         }
+    }
+}
+
+
+struct VPNServer: Identifiable {
+    let id: String
+    let title: String
+    let profile: Profile
+}
+
+extension Profile {
+    var availableProtocols: [VPNProtocol] {
+        guard let ids = json["enabledProtocols"] as? [String] else { return VPNProtocol.allCases }
+        return ids.compactMap(VPNProtocol.init(rawValue:))
+    }
+
+    var servers: [VPNServer] {
+        var primary = json
+        primary.removeValue(forKey: "additionalServers")
+        let main = VPNServer(id: "primary", title: str("serverTitle").isEmpty ? "Основной сервер" : str("serverTitle"),
+                             profile: Profile(json: primary))
+        return [main] + ((json["additionalServers"] as? [[String: Any]]) ?? []).compactMap { entry in
+            guard let id = entry["id"] as? String, let title = entry["title"] as? String,
+                  let profile = entry["profile"] as? [String: Any] else { return nil }
+            return VPNServer(id: id, title: title, profile: Profile(json: profile))
+        }
+    }
+
+    func replacingServer(_ id: String, with profile: Profile) -> Profile {
+        if id == "primary" {
+            var next = profile.json
+            next["additionalServers"] = json["additionalServers"]
+            next["serverTitle"] = json["serverTitle"]
+            return Profile(json: next)
+        }
+        var next = json
+        var entries = (json["additionalServers"] as? [[String: Any]]) ?? []
+        if let index = entries.firstIndex(where: { $0["id"] as? String == id }) {
+            var replacement = profile.json
+            replacement.removeValue(forKey: "additionalServers")
+            entries[index]["profile"] = replacement
+            next["additionalServers"] = entries
+        }
+        return Profile(json: next)
     }
 }

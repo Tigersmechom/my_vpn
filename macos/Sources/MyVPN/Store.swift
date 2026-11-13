@@ -11,6 +11,7 @@ struct SpeedResult: Codable, Identifiable {
     // Только для отбрасывания старых замеров через удалённый посредник.
     var viaRelay: Bool? = false
     var connectionTitle: String? = nil
+    var serverId: String? = nil
 
     var proto: VPNProtocol? { VPNProtocol(rawValue: protocolRaw) }
     var label: String { connectionTitle ?? proto?.title ?? protocolRaw }
@@ -26,8 +27,8 @@ final class Store {
         if let saved = defaults.string(forKey: "profile"), let migrated = try? Profile.parse(saved) {
             defaults.set(migrated.serialized(), forKey: "profile")
         }
-        if let raw = defaults.string(forKey: "protocol"), !profile.connections.contains(where: { $0.id == raw }) {
-            defaults.set(VPNProtocol.vlessTcp.rawValue, forKey: "protocol")
+        if let raw = defaults.string(forKey: "protocol"), !selectedServer.profile.connections.contains(where: { $0.id == raw }) {
+            defaults.set(selectedServer.profile.connections.first?.id, forKey: "protocol")
         }
     }
 
@@ -77,10 +78,29 @@ final class Store {
         defaults.set(data, forKey: "profileState")
     }
 
+    var selectedServer: VPNServer {
+        get {
+            let id = defaults.string(forKey: "serverId") ?? "primary"
+            return profile.servers.first { $0.id == id } ?? profile.servers[0]
+        }
+        set {
+            guard let server = profile.servers.first(where: { $0.id == newValue.id }) else { return }
+            defaults.set(server.id, forKey: "serverId")
+            if !server.profile.connections.contains(where: { $0.id == defaults.string(forKey: "protocol") }) {
+                defaults.set(server.profile.connections.first?.id, forKey: "protocol")
+            }
+        }
+    }
+
+    var editingProfile: Profile {
+        get { selectedServer.profile }
+        set { profile = profile.replacingServer(selectedServer.id, with: newValue) }
+    }
+
     var selectedConnection: VPNConnection {
         get {
             let id = defaults.string(forKey: "protocol") ?? VPNProtocol.vlessTcp.rawValue
-            return profile.connections.first { $0.id == id } ?? VPNConnection(.vlessTcp)
+            return selectedServer.profile.connections.first { $0.id == id } ?? selectedServer.profile.connections[0]
         }
         set { defaults.set(newValue.id, forKey: "protocol") }
     }
@@ -88,11 +108,13 @@ final class Store {
     func results() -> [SpeedResult] {
         guard let data = defaults.data(forKey: "results") else { return [] }
         let saved = (try? JSONDecoder().decode([SpeedResult].self, from: data)) ?? []
-        let ids = Set(profile.connections.map(\.id))
-        return saved.filter { ids.contains($0.protocolRaw) && $0.viaRelay != true }
+        let ids = Set(selectedServer.profile.connections.map(\.id))
+        return saved.filter { ids.contains($0.protocolRaw) && $0.viaRelay != true && ($0.serverId ?? "primary") == selectedServer.id }
     }
 
     func saveResults(_ list: [SpeedResult]) {
-        defaults.set(try? JSONEncoder().encode(Array(list.prefix(30))), forKey: "results")
+        let existing = defaults.data(forKey: "results").flatMap { try? JSONDecoder().decode([SpeedResult].self, from: $0) } ?? []
+        let others = existing.filter { ($0.serverId ?? "primary") != selectedServer.id }
+        defaults.set(try? JSONEncoder().encode(Array((Array(list.prefix(30)) + others).prefix(60))), forKey: "results")
     }
 }

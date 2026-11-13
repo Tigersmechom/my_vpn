@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="ru">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>My VPN · Рабочий стол США</title>
+<!-- myvpn-desktop-v1 -->
+<style>
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#202329;color:#eee;font:14px system-ui}
+body{display:flex;flex-direction:column}header{display:flex;align-items:center;gap:12px;padding:7px 12px;background:#292d34}
+button{border:1px solid #59606c;border-radius:5px;background:#353b45;color:#fff;padding:5px 9px;cursor:pointer}
+#status{flex:1}#screen{flex:1;min-height:0}#pastebox{display:none;padding:10px;background:#292d34}
+textarea{width:98%;height:70px}small{opacity:.7}
+</style>
+<header><span id="status">Подготовка рабочего стола…</span><button id="paste">Вставить текст</button><button id="ctrlalt">Ctrl + Alt + Del</button></header>
+<div id="pastebox"><textarea id="text" placeholder="Текст для буфера обмена сервера"></textarea><button id="send">Отправить в буфер сервера</button><small>Затем нажмите Ctrl+V в нужной программе сервера.</small></div>
+<div id="screen"></div>
+<script type="module">
+import RFB from './core/rfb.js';
+let rfb;
+const status=document.getElementById('status');
+window.myvpnConnect=password=>{
+  if(rfb)rfb.disconnect();
+  status.textContent='Подключение к рабочему столу…';
+  rfb=new RFB(document.getElementById('screen'),`ws://${location.host}/websockify`,{credentials:{password}});
+  rfb.scaleViewport=true;rfb.resizeSession=true;rfb.qualityLevel=6;rfb.compressionLevel=4;
+  rfb.addEventListener('connect',()=>{status.textContent='Рабочий стол Ubuntu · США';rfb.focus();});
+  rfb.addEventListener('disconnect',()=>{status.textContent='Соединение с рабочим столом завершено';});
+  rfb.addEventListener('securityfailure',()=>{status.textContent='Не удалось подтвердить доступ к рабочему столу';});
+};
+document.getElementById('ctrlalt').onclick=()=>rfb?.sendCtrlAltDel();
+document.getElementById('paste').onclick=()=>{const box=document.getElementById('pastebox');box.style.display=box.style.display==='block'?'none':'block';};
+document.getElementById('send').onclick=()=>{rfb?.clipboardPasteFrom(document.getElementById('text').value);document.getElementById('text').value='';document.getElementById('pastebox').style.display='none';rfb?.focus();};
+window.webkit?.messageHandlers?.myvpnDesktopReady?.postMessage('ready');
+</script>
+</html>

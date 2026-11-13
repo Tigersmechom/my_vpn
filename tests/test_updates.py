@@ -32,6 +32,25 @@ def bootstrap(client="android"):
 
 
 class UpdateCryptoTests(unittest.TestCase):
+    def test_multiregion_profile_roundtrip_and_invalid_catalog_rejected(self):
+        p = fixture("mac")
+        second = fixture("mac")
+        second["host"] = "203.0.113.21"
+        second["enabledProtocols"] = ["HY2", "HY2_OBFS", "AWG"]
+        p["additionalServers"] = [{"id": "us", "title": "США", "profile": second}]
+        envelope = updates.encrypt_update(p, bootstrap("mac"), 3)
+        self.assertEqual(updates.decrypt_update(envelope, bootstrap("mac"))["profile"], p)
+        for entry in ({"id": "primary", "title": "bad", "profile": second},
+                      {"id": "us", "title": "bad", "profile": p},
+                      {"id": "us", "title": "bad", "profile": fixture("android")}):
+            broken = dict(p, additionalServers=[entry])
+            with self.assertRaises(updates.UpdateError):
+                updates.encrypt_update(broken, bootstrap("mac"), 3)
+        for enabled in ([], ["AWG", "AWG"], ["NOPE"], [True]):
+            broken = fixture("mac") | {"enabledProtocols": enabled}
+            with self.assertRaises(updates.UpdateError):
+                updates.encrypt_update(broken, bootstrap("mac"), 3)
+
     def test_roundtrip_each_device_and_aad_contract(self):
         for client in updates.CLIENTS:
             p, b = fixture(client), bootstrap(client)
