@@ -3,14 +3,12 @@ import SwiftUI
 
 @main
 struct MyVPNApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var vpn = VPNManager()
 
     var body: some Scene {
         Window("My VPN", id: "main") {
             ContentView()
                 .environmentObject(vpn)
-                .onAppear { appDelegate.vpn = vpn }
         }
         .windowResizability(.contentSize)
 
@@ -27,29 +25,23 @@ struct MyVPNApp: App {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
-    var vpn: VPNManager?
-
-    func applicationWillTerminate(_ notification: Notification) {
-        // Не оставляем систему с DNS и маршрутами туннеля после выхода
-        vpn?.stopSync()
-    }
-}
-
 private struct MenuContent: View {
     @EnvironmentObject var vpn: VPNManager
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Text(vpn.state == .up ? "Туннель запущен · \(vpn.activeProtocol?.title ?? "")"
-             : vpn.state == .connecting ? "Подключение…" : "Отключено")
-        Button(vpn.state == .down ? "Подключить" : "Отключить") { vpn.toggle() }
+             : vpn.state == .connecting ? "Подключение…" : vpn.state == .blocked ? "Интернет заблокирован" : "Отключено")
+        Button(vpn.state == .down || vpn.state == .blocked ? "Подключить" : "Отключить") { vpn.toggle() }
             .disabled(vpn.state == .connecting || !vpn.helperReady)
+        if vpn.killSwitch == .blocked || vpn.killSwitch == .unavailable {
+            Button("Отключить VPN и снять блокировку") { Task { await vpn.disconnect() } }
+        }
         Divider()
         Picker("Сервер", selection: Binding(get: { vpn.selectedServerId }, set: { vpn.selectServer($0) })) {
             ForEach(vpn.servers) { Text($0.title).tag($0.id) }
         }
-        .disabled(vpn.state != .down)
+        .disabled(vpn.state == .up || vpn.state == .connecting)
         Picker("Протокол", selection: Binding(get: { vpn.selected }, set: { vpn.select($0) })) {
             ForEach(vpn.connections) { Text($0.title).tag($0) }
         }
@@ -59,6 +51,9 @@ private struct MenuContent: View {
             NSApp.activate(ignoringOtherApps: true)
         }
         Button("Рабочий стол США") { openWindow(id: "desktop-us"); NSApp.activate(ignoringOtherApps: true) }
+        if vpn.killSwitch == .active || vpn.killSwitch == .blocked {
+            Text("При выходе VPN и защита остаются включены")
+        }
         Button("Выход") { NSApp.terminate(nil) }.keyboardShortcut("q")
     }
 }

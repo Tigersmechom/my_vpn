@@ -32,13 +32,19 @@ if [[ ! -x $VENDOR/xray ]]; then
   rm -rf "$tmp"
 fi
 
-if [[ ! -x $VENDOR/amneziawg-go ]]; then
+AWG_BINDING="$PWD/awg/controlfns_myvpn_darwin.go"
+AWG_BINDING_HASH="$(shasum -a 256 "$AWG_BINDING" | awk '{print $1}')"
+if [[ ! -x $VENDOR/amneziawg-go || ! -f $VENDOR/awg-binding.sha256 || $(cat "$VENDOR/awg-binding.sha256") != "$AWG_BINDING_HASH" ]]; then
   step "amneziawg-go $AWG_GO_REF"
   command -v go >/dev/null || { echo "Нужен Go: brew install go" >&2; exit 1; }
-  rm -rf "$VENDOR/src-awg-go"
-  git clone -q --depth 1 --branch "$AWG_GO_REF" https://github.com/amnezia-vpn/amneziawg-go.git "$VENDOR/src-awg-go"
-  make -C "$VENDOR/src-awg-go" >/dev/null
+  if [[ ! -d $VENDOR/src-awg-go ]]; then
+    git clone -q --depth 1 --branch "$AWG_GO_REF" https://github.com/amnezia-vpn/amneziawg-go.git "$VENDOR/src-awg-go"
+  fi
+  [[ $(git -C "$VENDOR/src-awg-go" describe --tags --exact-match HEAD) == "$AWG_GO_REF" ]] || { echo "Неверная версия исходников AmneziaWG" >&2; exit 1; }
+  cp "$AWG_BINDING" "$VENDOR/src-awg-go/conn/"
+  (cd "$VENDOR/src-awg-go" && MACOSX_DEPLOYMENT_TARGET=13.0 go build -trimpath -o amneziawg-go .)
   cp "$VENDOR/src-awg-go/amneziawg-go" "$VENDOR/amneziawg-go"
+  echo "$AWG_BINDING_HASH" >"$VENDOR/awg-binding.sha256"
 fi
 
 if [[ ! -x $VENDOR/awg ]]; then
@@ -66,7 +72,7 @@ PROFILE=../config/mac.json
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/MyVPN"
-cp "$VENDOR/xray" "$VENDOR/amneziawg-go" "$VENDOR/awg" helper/myvpn-helper helper/install-helper.sh "$APP/Contents/Resources/"
+cp "$VENDOR/xray" "$VENDOR/amneziawg-go" "$VENDOR/awg" helper/myvpn-helper helper/kill-switch.sh helper/install-helper.sh "$APP/Contents/Resources/"
 cp "$PROFILE" "$APP/Contents/Resources/default_profile.json"
 if [[ -f ../config/mac-update.json ]]; then
   cp ../config/mac-update.json "$APP/Contents/Resources/update_bootstrap.json"
@@ -83,8 +89,8 @@ cat >"$APP/Contents/Info.plist" <<'EOF'
   <key>CFBundleExecutable</key><string>MyVPN</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.3.0</string>
-  <key>CFBundleVersion</key><string>4</string>
+  <key>CFBundleShortVersionString</key><string>1.3.1</string>
+  <key>CFBundleVersion</key><string>5</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>

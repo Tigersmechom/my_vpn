@@ -18,8 +18,9 @@ struct ContentView: View {
                     ForEach(vpn.servers) { server in Text(server.title).tag(server.id) }
                 }
                 .pickerStyle(.segmented)
-                .disabled(vpn.state != .down)
+                .disabled(vpn.state == .up || vpn.state == .connecting)
                 statusCard
+                killSwitchCard
                 section("Протокол")
                 VStack(spacing: 6) {
                     ForEach(vpn.connections) { p in protocolRow(p) }
@@ -51,9 +52,10 @@ struct ContentView: View {
     private var helperBanner: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Нужен служебный компонент").font(.headline)
-            Text("Чтобы управлять сетью (TUN, маршруты, DNS), приложение один раз установит helper. macOS попросит пароль администратора.")
+            Text("Для kill switch нужен новый сетевой компонент. Сначала отключите VPN, затем установите компонент; macOS попросит пароль администратора.")
                 .font(.callout).foregroundStyle(.secondary)
             Button("Установить") { Task { await vpn.installHelper() } }
+                .disabled(vpn.state != .down || vpn.installingHelper || vpn.killSwitch != .inactive)
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -64,6 +66,7 @@ struct ContentView: View {
         switch vpn.state {
         case .up: return .green
         case .connecting: return .orange
+        case .blocked: return .orange
         case .down: return .secondary
         }
     }
@@ -86,7 +89,7 @@ struct ContentView: View {
             .buttonStyle(.plain)
             .disabled(vpn.state == .connecting || !vpn.helperReady)
 
-            Text(vpn.state == .up ? "Туннель запущен" : vpn.state == .connecting ? "Подключение…" : "Отключено")
+            Text(vpn.state == .up ? "Туннель запущен" : vpn.state == .connecting ? "Подключение…" : vpn.state == .blocked ? "Интернет заблокирован" : "Отключено")
                 .font(.title2.weight(.semibold))
             TimelineView(.periodic(from: .now, by: 1)) { ctx in
                 Text(details(now: ctx.date)).font(.callout)
@@ -100,6 +103,33 @@ struct ContentView: View {
         .frame(maxWidth: .infinity)
         .padding(.vertical, 20)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private var killSwitchCard: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(killSwitchTitle, systemImage: vpn.killSwitch == .unavailable ? "exclamationmark.shield" : "lock.shield")
+                .font(.headline)
+            Text(vpn.killSwitch == .blocked
+                 ? "Туннель прерван. Подключитесь снова или явно отключите VPN, чтобы вернуть обычную сеть."
+                 : "Kill switch включается при подключении для обеих стран и всех режимов. При обрыве блокирует трафик вне VPN, включая IPv6 и доступ к локальной сети. Закрытие приложения сохраняет VPN и защиту.")
+                .font(.caption).foregroundStyle(.secondary)
+            if vpn.killSwitch == .blocked || vpn.killSwitch == .unavailable {
+                Button("Отключить VPN и снять блокировку") { Task { await vpn.disconnect() } }
+                    .disabled(vpn.state == .connecting)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background((vpn.killSwitch == .unavailable ? Color.red : Color.secondary).opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private var killSwitchTitle: String {
+        switch vpn.killSwitch {
+        case .inactive: return "Kill switch · готов к подключению"
+        case .active: return "Kill switch · защита включена"
+        case .blocked: return "Kill switch · сеть заблокирована"
+        case .unavailable: return "Kill switch · защита не подтверждена"
+        }
     }
 
     private func details(now: Date) -> String {

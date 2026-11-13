@@ -1,8 +1,6 @@
 import Foundation
 import SwiftUI
 
-enum VPNState { case down, connecting, up }
-
 @MainActor
 final class VPNManager: ObservableObject {
     let store = Store()
@@ -16,10 +14,14 @@ final class VPNManager: ObservableObject {
     @Published var since: Date?
     @Published var error: String?
     @Published var helperReady = false
+    @Published var killSwitch: KillSwitchState = .inactive
+    @Published var installingHelper = false
     @Published var results: [SpeedResult]
     @Published var updatingConfiguration = false
     @Published var configurationMessage: String?
     private let updateBootstrap = UpdateBootstrap.bundled
+    private var refreshing = false
+    private var changingConnection = false
 
     var connections: [VPNConnection] { store.selectedServer.profile.connections }
     var servers: [VPNServer] { store.profile.servers }
@@ -62,52 +64,75 @@ final class VPNManager: ObservableObject {
         selectedServerId = store.selectedServer.id
         selected = store.selectedConnection
         results = store.results()
-        Task { await refresh() }
+        Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                await self.refresh()
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+            }
+        }
     }
 
     /// Синхронизация с реальным состоянием (VPN мог остаться поднятым с прошлого запуска).
     func refresh() async {
+        guard !refreshing, !changingConnection, !installingHelper else { return }
+        refreshing = true
+        defer { refreshing = false }
         helperReady = await background { Helper.isReady }
-        guard helperReady else { return }
-        let status = (try? await background { try Helper.run(["status"]) }) ?? "down"
-        if status.hasPrefix("xray") || status.hasPrefix("awg") {
-            if state != .up { state = .up; since = since ?? Date() }
+        guard await background({ FileManager.default.isExecutableFile(atPath: Helper.installedPath) }) else { return }
+        do {
+            let status = try HelperStatus(try await background { try Helper.run(["status"]) })
+            guard !changingConnection, !installingHelper else { return }
+            state = status.state
+            killSwitch = status.protection
+        } catch {
+            killSwitch = .unavailable
+            self.error = "Не удалось проверить состояние сети: \(error.localizedDescription)"
+            return
+        }
+        if state == .up {
+            since = since ?? Date()
             if activeProtocol == nil { activeProtocol = selected }
-        } else if state == .up {
-            state = .down
+        } else {
             activeProtocol = nil
+            since = nil
         }
     }
 
     func installHelper() async {
+        guard state == .down, !changingConnection, !installingHelper, killSwitch == .inactive else { return }
+        installingHelper = true
         error = nil
         do {
             try await background { try Helper.install() }
         } catch {
             self.error = error.localizedDescription
         }
+        installingHelper = false
         await refresh()
     }
 
     func select(_ proto: VPNConnection) {
-        guard state != .connecting, proto != selected else { return }
+        guard !changingConnection, !installingHelper, state != .connecting, proto != selected else { return }
         selected = proto
         store.selectedConnection = proto
-        if state != .down { Task { await connect() } }
+        if state == .up { Task { await connect() } }
     }
 
     func selectServer(_ id: String) {
-        guard state == .down, let server = servers.first(where: { $0.id == id }) else { return }
+        guard !changingConnection, !installingHelper, state == .down || state == .blocked,
+              let server = servers.first(where: { $0.id == id }) else { return }
         store.selectedServer = server
         reloadProfileChoices()
     }
 
     func toggle() {
-        Task { state == .down ? await connect() : await disconnect() }
+        Task { state == .down || state == .blocked ? await connect() : await disconnect() }
     }
 
     func connect() async {
-        guard state != .connecting else { return }
+        guard helperReady, !changingConnection, !installingHelper else { return }
+        changingConnection = true
         let profile = store.selectedServer.profile
         let proto = profile.connections.first { $0.id == selected.id } ?? profile.connections[0]
         selected = proto
@@ -122,38 +147,47 @@ final class VPNManager: ObservableObject {
             try await background {
                 let dns = profile.dnsServers.joined(separator: ",")
                 if proto.usesXray {
+                    let config = try Configs.xrayForTunnel(profile, proto)
                     let file = dir.appendingPathComponent("xray.json")
-                    try Configs.xray(profile, proto).write(to: file, atomically: true, encoding: .utf8)
+                    try config.json.write(to: file, atomically: true, encoding: .utf8)
                     try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
-                    try Helper.run(["start-xray", file.path, dns])
+                    try Helper.run(["start-xray", file.path, dns, config.ip, String(config.port), config.transport])
                 } else {
                     let ip = try Configs.resolveIPv4(profile.host)
                     let awg = Configs.amnezia(profile, endpointIP: ip)
                     let file = dir.appendingPathComponent("awg.conf")
                     try awg.conf.write(to: file, atomically: true, encoding: .utf8)
                     try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
-                    try Helper.run(["start-awg", file.path, awg.address, String(awg.mtu), dns, ip])
+                    try Helper.run(["start-awg", file.path, awg.address, String(awg.mtu), dns, ip, String(profile.int("awg.port"))])
                 }
             }
             state = .up
+            killSwitch = .active
             since = Date()
         } catch {
             self.error = error.localizedDescription
             state = .down
             activeProtocol = nil
         }
+        changingConnection = false
+        await refresh()
     }
 
     func disconnect() async {
-        _ = try? await background { try Helper.run(["stop"]) }
-        state = .down
-        activeProtocol = nil
-        since = nil
-    }
-
-    /// Синхронная остановка при выходе из приложения, чтобы не оставить чужие DNS и маршруты.
-    nonisolated func stopSync() {
-        _ = try? Helper.run(["stop"])
+        guard !changingConnection, !installingHelper else { return }
+        changingConnection = true
+        error = nil
+        do {
+            _ = try await background { try Helper.run(["stop"]) }
+            state = .down
+            killSwitch = .inactive
+            activeProtocol = nil
+            since = nil
+        } catch {
+            self.error = error.localizedDescription
+        }
+        changingConnection = false
+        await refresh()
     }
 
     func addResult(_ r: SpeedResult) {

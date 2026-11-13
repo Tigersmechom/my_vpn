@@ -3,23 +3,28 @@
 # и запускается приложением через sudo без пароля (правило в /etc/sudoers.d/myvpn).
 #
 #   myvpn-helper version
-#   myvpn-helper start-xray <config.json>
-#   myvpn-helper start-awg <awg.conf> <адрес/маска> <mtu> <dns,dns> <ip сервера>
+#   myvpn-helper start-xray <config.json> <dns,dns> <ip сервера> <порт> <tcp|udp>
+#   myvpn-helper start-awg <awg.conf> <адрес/маска> <mtu> <dns,dns> <ip сервера> <порт>
 #   myvpn-helper stop
 #   myvpn-helper status
 #
 # Совместим с системным bash 3.2.
-set -euo pipefail
+set -Eeuo pipefail
 umask 077
 
-VERSION=5
+VERSION=6
 DIR=/Library/PrivilegedHelperTools/myvpn
 RUN=/var/run/myvpn
 LOG=/var/log/myvpn.log
 XRAY_TUN=utun199
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
+STARTING=0
 
-die() { echo "Ошибка: $*" >&2; exit 1; }
+die() {
+  echo "Ошибка: $*" >&2
+  if [[ $STARTING == 1 ]]; then STARTING=0; stop_tunnel || true; fi
+  exit 1
+}
 
 DNS_RE='^[0-9a-fA-F.: ]*$'
 clean_dns() {
@@ -32,6 +37,9 @@ log() { echo "$(date '+%F %T') $*" >>"$LOG"; }
 [[ $EUID -eq 0 ]] || die "нужны права root"
 mkdir -p "$RUN"
 chmod 700 "$RUN"
+source "$DIR/kill-switch.sh"
+# A failed start removes its partial tunnel, but deliberately keeps PF armed.
+trap 'code=$?; trap - ERR; if [[ $STARTING == 1 ]]; then STARTING=0; stop_tunnel || true; fi; exit "$code"' ERR
 
 # ---------- DNS ----------
 # На время подключения ставим публичные DNS всем сетевым службам: иначе запросы пойдут
@@ -100,7 +108,8 @@ ipv6_unblock() {
 
 # ---------- остановка ----------
 
-stop_all() {
+stop_tunnel() {
+  if [[ -f $RUN/ks.active ]]; then ks_load; fi
   if [[ -f $RUN/xray.pid ]]; then
     kill "$(cat "$RUN/xray.pid")" 2>/dev/null || true
     rm -f "$RUN/xray.pid"
@@ -137,7 +146,11 @@ start_xray() {
   local outbounds routing
   outbounds="$(/usr/bin/plutil -extract outbounds json -o - "$src")" || die "некорректные outbounds Xray"
   routing="$(/usr/bin/plutil -extract routing json -o - "$src")" || die "некорректные routing Xray"
-  stop_all
+  local dns
+  dns="$(clean_dns "${2:-}")"
+  ks_arm "${3:-}" "${4:-}" "${5:-}"
+  STARTING=1
+  stop_tunnel
   cat >"$RUN/xray.json" <<EOF
 {
   "log": {"loglevel": "warning"},
@@ -152,8 +165,6 @@ start_xray() {
 EOF
   chmod 600 "$RUN/xray.json"
 
-  local dns
-  dns="$(clean_dns "${2:-}")"
   log "start xray"
   nohup "$DIR/xray" run -c "$RUN/xray.json" >>"$LOG" 2>&1 &
   echo $! >"$RUN/xray.pid"
@@ -167,37 +178,42 @@ EOF
     ifconfig "$XRAY_TUN" >/dev/null 2>&1 && break
     sleep 0.2
   done
-  ifconfig "$XRAY_TUN" >/dev/null 2>&1 || { stop_all; die "не поднялся интерфейс $XRAY_TUN"; }
+  ifconfig "$XRAY_TUN" >/dev/null 2>&1 || die "не поднялся интерфейс $XRAY_TUN"
   ipv6_block
   dns_set "$dns"
+  ks_load "$XRAY_TUN"
+  STARTING=0
   echo "ok xray $XRAY_TUN"
 }
 
 # ---------- AmneziaWG ----------
 
 start_awg() {
-  local conf="$1" addr="$2" mtu="$3" dns="$4" endpoint="$5"
+  local conf="$1" addr="$2" mtu="$3" dns="$4" endpoint="$5" port="$6"
   [[ -f $conf ]] || die "нет файла конфига"
   [[ $addr =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$ ]] || die "неверный адрес $addr"
   [[ $mtu =~ ^[0-9]{3,4}$ ]] || die "неверный MTU $mtu"
   [[ $endpoint =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || die "неверный IP сервера $endpoint"
   dns="$(clean_dns "$dns")"
-  stop_all
+  ks_validate_endpoint "$endpoint" "$port" udp
 
   # Только ключи протокола — без Address/DNS/MTU/PostUp и прочего из wg-quick.
   grep -E -i '^[[:space:]]*(\[Interface\]|\[Peer\]|PrivateKey|ListenPort|Jc|Jmin|Jmax|S[1-4]|H[1-4]|I[1-5]|PublicKey|PresharedKey|Endpoint|AllowedIPs|PersistentKeepalive)([[:space:]]*=|[[:space:]]*$)' \
     "$conf" >"$RUN/wg.conf"
   chmod 600 "$RUN/wg.conf"
 
-  # Маршрут до сервера — через текущий шлюз, чтобы сами UDP-пакеты туннеля не ушли в туннель.
-  local gw gw_if
-  gw="$(route -n get default 2>/dev/null | awk '/gateway:/ {print $2}')"
+  # Bind ONLY the encrypted UDP sockets to the underlying network. A /32 route
+  # would also bypass VPN for desktop SSH and other traffic to this same host.
+  local gw_if
   gw_if="$(route -n get default 2>/dev/null | awk '/interface:/ {print $2}')"
-  [[ -n $gw || -n $gw_if ]] || die "нет маршрута по умолчанию (нет сети?)"
+  [[ $gw_if =~ ^[a-zA-Z][a-zA-Z0-9]{0,14}$ ]] || die "нет маршрута по умолчанию (нет сети?)"
+  ks_arm "$endpoint" "$port" udp
+  STARTING=1
+  stop_tunnel
 
   log "start awg $endpoint"
   rm -f "$RUN/awg.name"
-  WG_TUN_NAME_FILE="$RUN/awg.name" "$DIR/amneziawg-go" utun >>"$LOG" 2>&1 || die "amneziawg-go не запустился, см. $LOG"
+  MYVPN_OUTBOUND_INTERFACE="$gw_if" WG_TUN_NAME_FILE="$RUN/awg.name" "$DIR/amneziawg-go" utun >>"$LOG" 2>&1 || die "amneziawg-go не запустился, см. $LOG"
   local iface="" i
   for i in $(seq 1 25); do
     [[ -s $RUN/awg.name ]] && iface="$(cat "$RUN/awg.name")" && break
@@ -206,26 +222,26 @@ start_awg() {
   [[ -n $iface ]] || die "amneziawg-go не создал интерфейс"
   echo "$iface" >"$RUN/wg.iface"
 
-  "$DIR/awg" setconf "$iface" "$RUN/wg.conf" || { stop_all; die "awg setconf отверг конфиг"; }
+  "$DIR/awg" setconf "$iface" "$RUN/wg.conf" || die "awg setconf отверг конфиг"
   ifconfig "$iface" inet "$addr" "${addr%%/*}" alias
   ifconfig "$iface" mtu "$mtu" up
 
-  if [[ -n $gw ]]; then
-    route -q -n add -inet "$endpoint/32" "$gw" >/dev/null 2>&1 || true
-  else
-    route -q -n add -inet "$endpoint/32" -interface "$gw_if" >/dev/null 2>&1 || true
-  fi
-  echo "$endpoint/32" >"$RUN/endpoint.route"
   route -q -n add -inet 0.0.0.0/1 -interface "$iface" >/dev/null
   route -q -n add -inet 128.0.0.0/1 -interface "$iface" >/dev/null
 
   ipv6_block
   dns_set "$dns"
+  ks_load "$iface"
+  STARTING=0
   echo "ok awg $iface"
 }
 
 status() {
-  if [[ -f $RUN/xray.pid ]] && kill -0 "$(cat "$RUN/xray.pid")" 2>/dev/null; then
+  local protected=0
+  if ks_verified; then protected=1; fi
+  if [[ $protected == 1 && ! -s $RUN/ks.iface ]]; then
+    echo "blocked"
+  elif [[ -f $RUN/xray.pid ]] && kill -0 "$(cat "$RUN/xray.pid")" 2>/dev/null; then
     echo "xray $XRAY_TUN"
   elif [[ -f $RUN/wg.iface ]] && ifconfig "$(cat "$RUN/wg.iface")" >/dev/null 2>&1; then
     local iface; iface="$(cat "$RUN/wg.iface")"
@@ -233,15 +249,20 @@ status() {
     "$DIR/awg" show "$iface" latest-handshakes 2>/dev/null | awk '{print "handshake", $2}'
     "$DIR/awg" show "$iface" transfer 2>/dev/null | awk '{print "transfer", $2, $3}'
   else
-    echo "down"
+    if [[ $protected == 1 ]]; then echo "blocked"; else echo "down"; fi
+  fi
+  if [[ -f $RUN/ks.active ]]; then
+    if [[ $protected == 1 ]]; then echo "kill-switch on"; else echo "kill-switch failed"; fi
+  else
+    echo "kill-switch off"
   fi
 }
 
 case "${1:-}" in
   version) echo "$VERSION" ;;
-  start-xray) start_xray "${2:-}" "${3:-}" ;;
-  start-awg) start_awg "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" ;;
-  stop) stop_all; echo "ok" ;;
+  start-xray) start_xray "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" ;;
+  start-awg) start_awg "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" "${7:-}" ;;
+  stop) stop_tunnel; ks_release; echo "ok" ;;
   status) status ;;
   *) die "неизвестная команда" ;;
 esac
