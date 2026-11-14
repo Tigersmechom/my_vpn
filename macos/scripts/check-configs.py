@@ -19,11 +19,9 @@ with tempfile.TemporaryDirectory(prefix="myvpn-config-check-") as directory:
         str(root / "Sources/MyVPN/ProfileValidation.swift"),
         str(root / "Sources/MyVPN/RemoteUpdates.swift"),
         str(root / "Sources/MyVPN/Store.swift"),
-        str(root / "Sources/MyVPN/HelperStatus.swift"),
         str(root / "Tests/ConfigChecks.swift"),
         str(root / "Tests/UpdateChecks.swift"),
         str(root / "Tests/RegionChecks.swift"),
-        str(root / "Tests/KillSwitchChecks.swift"),
         "-o", str(temporary / "check"),
     ], check=True)
     subprocess.run([str(temporary / "check"), str(profile), directory, str(root.parent)], check=True)

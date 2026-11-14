@@ -14,7 +14,6 @@ struct ConfigChecks {
         }
         _ = try ProfileValidation.profile(publishedProfile.json)
         try RegionChecks.run(profile: publishedProfile)
-        try KillSwitchChecks.run(profile: publishedProfile, destination: destination)
         // Migration/state fixtures have four modes even when the live feed has additional modes.
         var baseline = publishedProfile.json
         baseline.removeValue(forKey: "extraXray")

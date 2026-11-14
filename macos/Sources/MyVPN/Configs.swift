@@ -6,59 +6,6 @@ private let privateNets = [
 ]
 
 enum Configs {
-    struct TunnelConfig {
-        let json: String
-        let ip: String
-        let port: Int
-        let transport: String
-    }
-
-    /// Resolve only the VPN endpoint before arming PF; never grant direct DNS
-    /// access to a physical network. Preserve TLS/REALITY serverName and pins.
-    static func xrayForTunnel(_ p: Profile, _ connection: VPNConnection,
-                              resolve: (String) throws -> String = resolveIPv4) throws -> TunnelConfig {
-        let data = Data(xray(p, connection).utf8)
-        guard var config = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              var outbounds = config["outbounds"] as? [[String: Any]], !outbounds.isEmpty,
-              var settings = outbounds[0]["settings"] as? [String: Any] else {
-            throw VPNError("Не удалось определить VPN-соединение для kill switch")
-        }
-        let stream = outbounds[0]["streamSettings"] as? [String: Any] ?? [:]
-        let network = stream["network"] as? String ?? "raw"
-        var transport: String
-        switch network {
-        case "hysteria", "quic", "kcp": transport = "udp"
-        case "raw", "tcp", "xhttp", "splithttp", "grpc", "ws", "http", "httpupgrade", "h2": transport = "tcp"
-        default: throw VPNError("Kill switch пока не поддерживает транспорт \(network)")
-        }
-        if outbounds[0]["protocol"] as? String == "shadowsocks", ["raw", "tcp"].contains(network) {
-            transport = "tcp-udp"
-        }
-        var destination = settings
-        let arrayKey = settings["vnext"] != nil ? "vnext" : settings["servers"] != nil ? "servers" : nil
-        if let arrayKey {
-            guard let entries = settings[arrayKey] as? [[String: Any]], entries.count == 1 else {
-                throw VPNError("Для kill switch требуется один адрес VPN-сервера")
-            }
-            destination = entries[0]
-        }
-        guard let host = destination["address"] as? String, !host.isEmpty,
-              let port = destination["port"] as? Int, (1...65535).contains(port) else {
-            throw VPNError("В режиме не задан адрес или порт VPN-сервера")
-        }
-        let ip = try resolve(host)
-        destination["address"] = ip
-        if let arrayKey { settings[arrayKey] = [destination] } else { settings = destination }
-        outbounds[0]["settings"] = settings
-        // No private-LAN bypass: all application traffic uses the encrypted
-        // outbound. The helper separately permits only loopback and DHCP.
-        config["routing"] = ["domainStrategy": "AsIs", "rules": [] as [Any]]
-        outbounds.removeAll { $0["tag"] as? String == "direct" }
-        config["outbounds"] = outbounds
-        let encoded = try JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted])
-        return TunnelConfig(json: String(decoding: encoded, as: UTF8.self), ip: ip, port: port, transport: transport)
-    }
-
     static func xray(_ p: Profile, _ connection: VPNConnection) -> String {
         if let builtin = connection.builtin { return xray(p, builtin) }
         return wrap(connection.outbound!)

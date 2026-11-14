@@ -15,17 +15,12 @@ case "${1:-}" in
     src="$2" uid="$3"
     [[ $uid =~ ^[0-9]+$ ]] || { echo "неверный uid" >&2; exit 1; }
     if [[ -x $DEST/myvpn-helper ]]; then
-      status="$("$DEST/myvpn-helper" status)"
-      if [[ $status != down* || $status == *'kill-switch on'* || $status == *'kill-switch failed'* ]]; then
-        echo "Сначала явно отключите VPN в приложении; активный helper нельзя заменять" >&2
-        exit 1
-      fi
+      "$DEST/myvpn-helper" stop >/dev/null
     fi
     mkdir -p "$DEST"
     chown root:wheel "$DEST"
     chmod 755 "$DEST"
-    # Publish the new helper version only after its library and cores exist.
-    for f in xray amneziawg-go awg kill-switch.sh myvpn-helper; do
+    for f in myvpn-helper xray amneziawg-go awg; do
       install -m 755 -o root -g wheel "$src/$f" "$DEST/$f"
     done
     tmp="$(mktemp)"
@@ -36,7 +31,7 @@ case "${1:-}" in
     echo ok
     ;;
   uninstall)
-    "$DEST/myvpn-helper" stop >/dev/null
+    "$DEST/myvpn-helper" stop >/dev/null 2>&1 || true
     rm -f "$SUDOERS"
     rm -rf "$DEST"
     echo ok
