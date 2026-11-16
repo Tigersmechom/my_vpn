@@ -189,7 +189,7 @@ object ProfileValidation {
         require(p.int("awg.jmin") >= 0 && p.int("awg.jmax") >= p.int("awg.jmin")) { "В обновлении неверные параметры AmneziaWG" }
         require(p.dnsServers.isNotEmpty()) { "В обновлении не задан DNS" }
         require(runCatching { AwgConfig.build(p) }.isSuccess) { "В обновлении неверная конфигурация AmneziaWG" }
-        require(p.protocols.size >= 4)
+        require(p.directProtocols.isNotEmpty()) { "Нет поддерживаемых протоколов" }
     }
 }
 

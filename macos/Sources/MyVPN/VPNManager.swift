@@ -108,8 +108,9 @@ final class VPNManager: ObservableObject {
 
     func connect() async {
         guard state != .connecting else { return }
-        let profile = store.selectedServer.profile
-        let proto = profile.connections.first { $0.id == selected.id } ?? profile.connections[0]
+        let catalog = store.selectedServer.profile
+        let proto = catalog.connections.first { $0.id == selected.id } ?? catalog.connections[0]
+        let profile = catalog.connectionProfile(proto)
         selected = proto
         store.selectedConnection = proto
         error = nil
@@ -123,7 +124,7 @@ final class VPNManager: ObservableObject {
                 let dns = profile.dnsServers.joined(separator: ",")
                 if proto.usesXray {
                     let file = dir.appendingPathComponent("xray.json")
-                    try Configs.xray(profile, proto).write(to: file, atomically: true, encoding: .utf8)
+                    try Configs.xray(catalog, proto).write(to: file, atomically: true, encoding: .utf8)
                     try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
                     try Helper.run(["start-xray", file.path, dns])
                 } else {

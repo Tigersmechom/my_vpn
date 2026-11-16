@@ -91,7 +91,7 @@ struct ContentView: View {
             TimelineView(.periodic(from: .now, by: 1)) { ctx in
                 Text(details(now: ctx.date)).font(.callout)
             }
-            Text("\(vpn.state == .down ? vpn.store.selectedServer.title : (vpn.activeServerTitle ?? vpn.store.selectedServer.title)) · \(vpn.state == .down ? vpn.store.selectedServer.profile.host : (vpn.activeServerHost ?? vpn.store.selectedServer.profile.host))")
+            Text("\(vpn.state == .down ? vpn.store.selectedServer.title : (vpn.activeServerTitle ?? vpn.store.selectedServer.title)) · \(vpn.state == .down ? vpn.store.selectedServer.profile.connectionProfile(vpn.selected).host : (vpn.activeServerHost ?? vpn.store.selectedServer.profile.connectionProfile(vpn.selected).host))")
                 .font(.caption).foregroundStyle(.secondary)
             if let e = vpn.error {
                 Text(e).font(.caption).foregroundStyle(.red).multilineTextAlignment(.center).textSelection(.enabled)

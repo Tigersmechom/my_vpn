@@ -38,11 +38,11 @@ class ProfileConfigTest {
         assertEquals(p.toString(), Profile.parse(p.toString()).toString())
     }
 
-    @Test fun removedAndUnknownSavedProtocolsFallBackToTcp() {
+    @Test fun removedAndUnknownSavedProtocolsFallBackToHysteria() {
         for (name in listOf("WG", "VLESS_XHTTP", "future", null)) {
-            assertEquals(Protocol.VLESS_TCP, Protocol.restored(name))
+            assertEquals(Protocol.HY2, Protocol.restored(name))
         }
-        for (p in Protocol.entries) assertEquals(p, Protocol.restored(p.name))
+        for (p in Protocol.supported) assertEquals(p, Protocol.restored(p.name))
     }
 
     @Test fun vlessUsesTcpRealityVision() {
@@ -105,7 +105,7 @@ class ProfileConfigTest {
         assertFalse(p.json.has("wg"))
         assertFalse(p.json.has("relay"))
         assertFalse(p.json.getJSONObject("vless").has("xhttpPort"))
-        assertEquals(444, p.int("vless.tcpPort"))
+        assertEquals(443, p.int("vless.tcpPort"))
         assertEquals("changed", p.str("hy2.auth"))
     }
 }

@@ -54,7 +54,7 @@ class ProfileUpdateTest {
         val update = decode(envelope(p))
         assertEquals(3, update.revision)
         assertEquals(p.toString(), update.profile.toString())
-        assertEquals(4, update.profile.protocols.size)
+        assertEquals(3, update.profile.protocols.size)
     }
 
     @Test fun sameRevisionIsAcceptedForIdempotentStorageAndFirstBootstrapApply() {
@@ -99,18 +99,10 @@ class ProfileUpdateTest {
         })) }
     }
 
-    @Test fun extraProtocolKeepsIdentityHistoryAndFixedLocalTunnelConfig() {
+    @Test fun retiredExtraProtocolsAreNotOfferedAfterUpdate() {
         val update = decode(envelope(profile().put("extraXray", JSONArray().put(extra()))))
-        val custom = update.profile.protocols.last()
-        assertEquals("custom-trojan", custom.name)
-        assertEquals(custom, Protocol.restored("custom-trojan", update.profile))
-        assertEquals(custom.name, Protocol.history(custom.name, custom.title)?.name)
-        val config = JSONObject(XrayConfig.build(update.profile, custom, 10808))
-        assertEquals(2, config.getJSONArray("inbounds").length())
-        assertEquals("127.0.0.1", config.getJSONArray("inbounds").getJSONObject(1).getString("listen"))
-        val outbound = config.getJSONArray("outbounds").getJSONObject(0)
-        assertEquals("trojan", outbound.getString("protocol"))
-        assertEquals("proxy", outbound.getString("tag"))
+        assertEquals(listOf("HY2", "HY2_OBFS", "AWG"), update.profile.protocols.map { it.name })
+        assertEquals(Protocol.HY2, Protocol.restored("custom-trojan", update.profile))
     }
 
     @Test fun rejectsUnknownProtocolsDuplicateIdsAndDangerousFields() {

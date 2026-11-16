@@ -68,7 +68,7 @@ class XrayVpnService : VpnService() {
     private fun start(profile: Profile, proto: Protocol) {
         shutdownCore()
         protocol = proto
-        activeHost = profile.host
+        activeHost = profile.connectionProfile(proto).host
         error = null
         setState(STATE_CONNECTING)
         try {
@@ -80,7 +80,7 @@ class XrayVpnService : VpnService() {
                 .addRoute("0.0.0.0", 0)
                 .addDisallowedApplication(packageName)
             // IPv6-адрес не добавляем: тогда Android блокирует IPv6 целиком и он не утекает мимо туннеля.
-            profile.dnsServers.forEach { runCatching { builder.addDnsServer(it) } }
+            profile.connectionProfile(proto).dnsServers.forEach { runCatching { builder.addDnsServer(it) } }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) builder.setMetered(false)
 
             val fd = builder.establish() ?: error("Нет разрешения на VPN")

@@ -40,24 +40,14 @@ class StoreUpdateTest {
         assertEquals(0, store.appliedRevision)
     }
 
-    @Test fun customSelectionAndHistoryRemainDistinctAcrossProfileReload() {
+    @Test fun removedModeFallsBackAndRetiredHistoryIsHidden() {
         val store = store()
-        val p = Profile.parse("""{"version":2,"host":"192.0.2.1","vless":{},"extraXray":[
-            {"id":"custom-a","title":"A","outbound":{"protocol":"trojan","settings":{"servers":[{"address":"192.0.2.2","port":443,"password":"test"}]}}},
-            {"id":"custom-b","title":"B","outbound":{"protocol":"trojan","settings":{"servers":[{"address":"192.0.2.3","port":443,"password":"test"}]}}}
-        ]}""")
-        store.profile = p
-        val a = p.protocols.first { it.name == "custom-a" }
-        val b = p.protocols.first { it.name == "custom-b" }
-        store.protocol = b
-        store.addResult(SpeedResult(a, 1, 10, 20.0, 30.0, "192.0.2.2"))
-        store.addResult(SpeedResult(b, 2, 11, 21.0, 31.0, "192.0.2.3"))
-        assertEquals("custom-b", store.protocol.name)
-        assertEquals(listOf("custom-b", "custom-a"), store.results().map { it.protocol.name })
-        store.profile = profile("192.0.2.4")
-        assertEquals(Protocol.VLESS_TCP, store.protocol)
-        assertEquals(listOf("B", "A"), store.results().map { it.label })
+        store.protocol = Protocol.VLESS_TCP
+        store.addResult(SpeedResult(Protocol.VLESS_TCP, 1, 10, 20.0, 30.0, "192.0.2.2"))
+        assertEquals(Protocol.HY2, store.protocol)
+        assertTrue(store.results().isEmpty())
     }
+
 }
 
 /** Models Android's commit behavior: in-memory state changes even if disk write fails. */

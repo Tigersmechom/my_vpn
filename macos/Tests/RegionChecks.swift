@@ -4,6 +4,7 @@ enum RegionChecks {
     static func run(profile: Profile) throws {
         var secondary = profile.json
         secondary.removeValue(forKey: "additionalServers")
+        secondary.removeValue(forKey: "routes")
         secondary["host"] = "203.0.113.21"
         secondary["enabledProtocols"] = ["HY2", "HY2_OBFS", "AWG"]
         secondary.removeValue(forKey: "extraXray")
@@ -41,7 +42,7 @@ enum RegionChecks {
         try store.applyRemote(try ProfileValidation.profile(replacement), revision: 100)
         precondition(store.selectedServer.id == "primary")
         precondition(store.selectedConnection.id == "HY2")
-        for value: Any in [[], ["AWG", "AWG"], ["INVALID"], [true]] {
+        for value: Any in [[], ["AWG", "AWG"], ["INVALID"], ["VLESS_TCP"], [true]] {
             var invalid = secondary
             invalid["enabledProtocols"] = value
             do { _ = try ProfileValidation.profile(invalid); preconditionFailure("Bad protocol list accepted") } catch { }

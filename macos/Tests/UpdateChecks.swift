@@ -3,7 +3,7 @@ import CryptoKit
 
 enum UpdateChecks {
     static func run(profile: Profile, publishedProfile: Profile, output: URL, source: URL, repository: URL) throws {
-        precondition(profile.connections.count == VPNProtocol.allCases.count)
+        precondition(profile.connections.count == 3)
         let origin = URL(string: "https://example.com/path%20with%2Fescape/mac.json?token=a%2Bb&sig=a%3Db&empty=&flag")!
         let originalComponents = URLComponents(url: origin, resolvingAgainstBaseURL: false)!
         let nonce = UUID(uuidString: "00000000-0000-4000-8000-000000000001")!
@@ -73,9 +73,9 @@ enum UpdateChecks {
         var extended = profile.json
         extended["extraXray"] = [extra]
         let update = try RemoteUpdates.verify(encoded(extended, revision: 2), bootstrap: bootstrap, highestRevision: 1)
-        precondition(update.profile.connections.count == 5)
+        precondition(update.profile.connections.count == 3)
         try RemoteUpdates.validateExtraConfigs(update.profile, executable: repository.appendingPathComponent("macos/vendor/xray"))
-        let custom = update.profile.connections.last!
+        let custom = VPNConnection(id: "custom-tls", title: "Retired transport fixture", outbound: extra["outbound"] as! [String: Any])
         precondition(custom.id == "custom-tls" && custom.usesXray && custom.builtin == nil)
         let config = Configs.xray(update.profile, custom)
         let object = try JSONSerialization.jsonObject(with: Data(config.utf8)) as! [String: Any]
@@ -118,14 +118,14 @@ enum UpdateChecks {
         let activeSnapshot = store.profile
         try store.applyRemote(update.profile, revision: 2)
         store.selectedConnection = custom
-        precondition(store.highestRevision == 2 && store.profile.connections.count == 5)
-        precondition(activeSnapshot.connections.count == 4) // running connections keep their snapshot
-        precondition(Store(defaults: defaults).selectedConnection.id == custom.id)
+        precondition(store.highestRevision == 2 && store.profile.connections.count == 3)
+        precondition(activeSnapshot.connections.count == 3) // running connections keep their snapshot
+        precondition(Store(defaults: defaults).selectedConnection.id == "HY2")
         do { try store.applyRemote(profile, revision: 1); preconditionFailure("Rollback saved") } catch { }
-        precondition(store.highestRevision == 2 && store.profile.connections.count == 5)
+        precondition(store.highestRevision == 2 && store.profile.connections.count == 3)
         store.profile = profile.with(["host": "edited.example.com"])
         store.resetProfile()
-        precondition(store.highestRevision == 2 && store.profile.connections.count == 5)
+        precondition(store.highestRevision == 2 && store.profile.connections.count == 3)
 
         // Python publisher -> real CryptoKit interoperability, when the private bootstrap exists.
         let bootstrapURL = repository.appendingPathComponent("config/mac-update.json")

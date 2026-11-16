@@ -15,11 +15,12 @@ object XrayConfig {
      * Клиентский конфиг Xray: TUN-inbound (fd передаётся отдельно в startLoop),
      * локальный SOCKS для встроенного теста скорости и outbound VLESS+Reality или Hysteria2.
      */
-    fun build(p: Profile, protocol: Protocol, socksPort: Int): String {
-        val proxy = when (protocol) {
-            Protocol.HY2, Protocol.HY2_OBFS -> hysteria(p, obfs = protocol == Protocol.HY2_OBFS)
-            Protocol.VLESS_TCP -> vless(p)
-            Protocol.AWG -> error("Для AmneziaWG используется отдельное ядро")
+    fun build(catalog: Profile, protocol: Protocol, socksPort: Int): String {
+        val p = catalog.connectionProfile(protocol)
+        val proxy = when (protocol.baseName) {
+            "HY2", "HY2_OBFS" -> hysteria(p, obfs = protocol.baseName == "HY2_OBFS")
+            "VLESS_TCP" -> vless(p)
+            "AWG" -> error("Для AmneziaWG используется отдельное ядро")
             else -> protocol.customOutbound?.let { JSONObject(it) }
                 ?: error("Для этого протокола нужно обновить приложение")
         }

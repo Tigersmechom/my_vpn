@@ -6,6 +6,7 @@ Only fixed public HTTPS endpoints and DNS are queried; no credentials are logged
 """
 import argparse
 import importlib.util
+import ipaddress
 import json
 from pathlib import Path
 import secrets
@@ -77,9 +78,12 @@ def candidates(profile):
         yield name, outbound
     for item in profile.get("extraXray", []):
         yield item["title"], item["outbound"]
+    for route in profile.get("routes", []):
+        for name, outbound in candidates(route["profile"]):
+            yield route["title"] + " / " + name, outbound
 
 
-def check(name, outbound, executable, interface):
+def check(name, outbound, executable, interface, expected_exit=None):
     result = {"mode": name, "checks": {}}
     with tempfile.TemporaryDirectory(prefix="myvpn-probe-") as directory:
         with socket.socket() as reservation:
@@ -133,6 +137,17 @@ def check(name, outbound, executable, interface):
                 result["checks"]["UDP DNS"] = "OK"
             except (OSError, ValueError):
                 result["checks"]["UDP DNS"] = "FAILED"
+            if expected_exit:
+                response = subprocess.run([
+                    "curl", "--silent", "--max-time", "10", "--max-filesize", "64",
+                    "--socks5-hostname", f"127.0.0.1:{port}", "https://api.ipify.org",
+                ], capture_output=True, text=True, timeout=12)
+                try:
+                    actual = str(ipaddress.ip_address(response.stdout.strip()))
+                except ValueError:
+                    actual = None
+                result["checks"]["Exit IP"] = "OK" if response.returncode == 0 and actual == expected_exit else "FAILED"
+                result["exitIP"] = actual
         except (OSError, RuntimeError, subprocess.TimeoutExpired):
             result["checks"]["process"] = "FAILED"
         finally:
@@ -153,10 +168,20 @@ def main():
     args = parser.parse_args()
     profile = export.validate(json.loads(args.profile.read_text()))
     failed = False
-    for name, outbound in candidates(profile):
-        result = check(name, outbound, args.xray, args.interface)
-        print(json.dumps(result, ensure_ascii=False), flush=True)
-        failed |= any(value != "OK" for value in result["checks"].values())
+    groups = [("", profile)] + [(r["title"], r["profile"]) for r in profile.get("routes", [])]
+    for title, group in groups:
+        direct = dict(group)
+        direct.pop("routes", None)
+        expected_exit = group.get("exitHost", group["host"])
+        try:
+            expected_exit = str(ipaddress.ip_address(expected_exit))
+        except ValueError:
+            expected_exit = None
+        for name, outbound in candidates(direct):
+            label = f"{title} / {name}" if title else name
+            result = check(label, outbound, args.xray, args.interface, expected_exit)
+            print(json.dumps(result, ensure_ascii=False), flush=True)
+            failed |= any(value != "OK" for value in result["checks"].values())
     return int(failed)
 
 

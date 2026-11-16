@@ -77,6 +77,7 @@ class Store internal constructor(
         val arr = runCatching { JSONArray(prefs.getString(KEY_RESULTS, "[]")) }.getOrElse { JSONArray() }
         return (0 until arr.length()).mapNotNull { i ->
             val o = arr.optJSONObject(i) ?: return@mapNotNull null
+            if (profile.protocols.none { it.name == o.optString("protocol") }) return@mapNotNull null
             // Старые замеры через посредника не смешиваем с прямым подключением.
             if (o.optBoolean("relay")) return@mapNotNull null
             runCatching {

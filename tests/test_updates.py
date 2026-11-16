@@ -32,6 +32,27 @@ def bootstrap(client="android"):
 
 
 class UpdateCryptoTests(unittest.TestCase):
+    def test_routes_roundtrip_and_reject_nested_or_cross_device_profiles(self):
+        p = fixture("mac")
+        p["enabledProtocols"] = ["HY2", "HY2_OBFS", "AWG"]
+        edge = copy.deepcopy(p)
+        edge["host"] = "203.0.113.91"
+        routed = copy.deepcopy(p)
+        routed["host"] = edge["host"]
+        routed["exitHost"] = p["host"]
+        routed["hy2"].update(port=10443, obfsPort=10444)
+        routed["awg"]["port"] = 10445
+        p["routes"] = [{"id": "es", "title": "Испания", "profile": edge},
+                       {"id": "es-fi", "title": "Испания → Финляндия", "profile": routed}]
+        envelope = updates.encrypt_update(p, bootstrap("mac"), 5)
+        self.assertEqual(updates.decrypt_update(envelope, bootstrap("mac"))["profile"], p)
+        for routes in ([], [p["routes"][0], p["routes"][0]],
+                       [{"id": "bad", "title": "Nested", "profile": p}],
+                       [{"id": "bad", "title": "Other device", "profile": fixture("android")}],
+                       [{"id": "bad", "title": "Invalid", "profile": dict(edge, enabledProtocols=["VLESS_TCP"])}]):
+            with self.assertRaises(updates.UpdateError):
+                updates.encrypt_update(dict(p, routes=routes), bootstrap("mac"), 5)
+
     def test_multiregion_profile_roundtrip_and_invalid_catalog_rejected(self):
         p = fixture("mac")
         second = fixture("mac")

@@ -7,23 +7,27 @@ data class Protocol(
     val title: String,
     val subtitle: String,
     val customOutbound: String? = null,
+    val baseName: String = name,
+    val routeId: String? = null,
 ) {
-    val usesXray get() = name != AWG.name
+    val usesXray get() = baseName != AWG.name
 
     companion object {
         val VLESS_TCP = Protocol("VLESS_TCP", "VLESS Reality · TCP", "Vision, маскировка под HTTPS")
-        val HY2 = Protocol("HY2", "Hysteria2", "QUIC, UDP")
-        val HY2_OBFS = Protocol("HY2_OBFS", "Hysteria2 + Salamander", "QUIC с обфускацией, UDP")
+        val HY2 = Protocol("HY2", "Hysteria 2", "QUIC, UDP")
+        val HY2_OBFS = Protocol("HY2_OBFS", "Hysteria 2 + Salamander", "QUIC с обфускацией, UDP")
         val AWG = Protocol("AWG", "AmneziaWG", "WireGuard с обфускацией, UDP")
         val entries = listOf(VLESS_TCP, HY2, HY2_OBFS, AWG)
 
-        /** Старый или удалённый выбор безопасно заменяем на TCP. */
+        val supported = listOf(HY2, HY2_OBFS, AWG)
+
+        /** Старый выбор заменяется первым доступным режимом текущего профиля. */
         fun restored(name: String?, profile: Profile? = null): Protocol =
-            (profile?.protocols ?: entries).firstOrNull { it.name == name } ?: VLESS_TCP
+            (profile?.protocols ?: supported).let { modes -> modes.firstOrNull { it.name == name } ?: modes.first() }
 
         fun history(name: String, title: String): Protocol? = entries.firstOrNull { it.name == name }
-            ?: name.takeIf { it.matches(Regex("^custom-[A-Za-z0-9_-]{1,48}$")) }
-                ?.let { Protocol(it, title.take(80).ifBlank { it }, "") }
+            ?: Regex("^route-([A-Za-z0-9_-]{1,32})-(HY2_OBFS|HY2|AWG)$").matchEntire(name)
+                ?.let { Protocol(name, title.take(80).ifBlank { name }, "", baseName = it.groupValues[2], routeId = it.groupValues[1]) }
     }
 }
 
@@ -41,7 +45,29 @@ class Profile(val json: JSONObject) {
     fun int(path: String): Int = str(path).trim().toIntOrNull() ?: 0
 
     val host get() = str("host")
-    val protocols: List<Protocol> get() = Protocol.entries + ExtraXray.parse(json.optJSONArray("extraXray"))
+    val directProtocols: List<Protocol> get() {
+        val enabled = json.optJSONArray("enabledProtocols") ?: return Protocol.supported
+        val ids = (0 until enabled.length()).map { enabled.getString(it) }.toSet()
+        return Protocol.supported.filter { it.name in ids }
+    }
+    val protocols: List<Protocol> get() {
+        val direct = directProtocols.map { if (json.has("routes")) it.copy(title = "${it.title} · Финляндия") else it }
+        val routes = json.optJSONArray("routes") ?: return direct
+        return direct + (0 until routes.length()).flatMap { i ->
+            val route = routes.getJSONObject(i)
+            val id = route.getString("id")
+            Profile(route.getJSONObject("profile")).directProtocols.map {
+                it.copy(name = "route-$id-${it.name}", title = "${it.title} · ${route.getString("title")}", routeId = id)
+            }
+        }
+    }
+
+    fun connectionProfile(protocol: Protocol): Profile {
+        val id = protocol.routeId ?: return this
+        val routes = json.getJSONArray("routes")
+        return (0 until routes.length()).map { routes.getJSONObject(it) }
+            .first { it.getString("id") == id }.let { Profile(it.getJSONObject("profile")) }
+    }
     val dnsServers get() = str("dns").split(',', ' ').map { it.trim() }.filter { it.isNotEmpty() }
 
     /** Копия профиля с изменёнными полями. Числовые поля сохраняются числами. */
@@ -83,6 +109,7 @@ class Profile(val json: JSONObject) {
             obj.put("version", 2)
             require(!obj.has("extraXray") || obj.opt("extraXray") is org.json.JSONArray) { "Дополнительные режимы должны быть списком" }
             ExtraXray.parse(obj.optJSONArray("extraXray"))
+            RouteValidation.validate(obj)
             return Profile(obj)
         }
     }
@@ -99,16 +126,6 @@ object Fields {
             "Сервер", listOf(
                 Field("host", "Адрес сервера (IP или домен)"),
                 Field("dns", "DNS внутри туннеля"),
-            )
-        ),
-        FieldGroup(
-            "VLESS + Reality", listOf(
-                Field("vless.uuid", "UUID"),
-                Field("vless.sni", "SNI (маскировочный сайт)"),
-                Field("vless.publicKey", "Public key"),
-                Field("vless.shortId", "Short ID"),
-                Field("vless.fingerprint", "Fingerprint"),
-                Field("vless.tcpPort", "Порт TCP", numeric = true),
             )
         ),
         FieldGroup(

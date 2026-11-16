@@ -14,9 +14,11 @@ struct ConfigChecks {
         }
         _ = try ProfileValidation.profile(publishedProfile.json)
         try RegionChecks.run(profile: publishedProfile)
+        try RouteChecks.run(profile: publishedProfile, output: destination)
         // Migration/state fixtures have four modes even when the live feed has additional modes.
         var baseline = publishedProfile.json
         baseline.removeValue(forKey: "extraXray")
+        baseline.removeValue(forKey: "routes")
         let profile = Profile(json: baseline)
         precondition(Set(VPNProtocol.allCases.map(\.rawValue)) == ["VLESS_TCP", "HY2", "HY2_OBFS", "AWG"])
 
@@ -45,8 +47,8 @@ struct ConfigChecks {
         for removed in ["WG", "VLESS_XHTTP"] {
             defaults.set(removed, forKey: "protocol")
             let store = Store(defaults: defaults)
-            precondition(store.selectedConnection.builtin == .vlessTcp)
-            precondition(defaults.string(forKey: "protocol") == VPNProtocol.vlessTcp.rawValue)
+            precondition(store.selectedConnection.builtin == .hy2)
+            precondition(defaults.string(forKey: "protocol") == VPNProtocol.hy2.rawValue)
             precondition(defaults.object(forKey: "useRelay") == nil)
             precondition(store.profile.json["relay"] == nil)
             precondition(store.profile.host == profile.host)
@@ -113,17 +115,25 @@ struct ConfigChecks {
             }
         }
         let extras = publishedProfile.connections.filter { $0.builtin == nil }
-        precondition(extras.count == ((publishedProfile.json["extraXray"] as? [[String: Any]]) ?? []).count)
-        for connection in extras {
-            let config = Configs.xray(publishedProfile, connection)
-            let object = try JSONSerialization.jsonObject(with: Data(config.utf8)) as! [String: Any]
-            let proxy = (object["outbounds"] as! [[String: Any]])[0]
-            var expected = connection.outbound!
-            expected["tag"] = "proxy"
-            precondition(NSDictionary(dictionary: proxy).isEqual(to: expected))
-            let file = destination.appendingPathComponent("published-\(connection.id).json")
-            try config.write(to: file, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        precondition(extras.isEmpty)
+        for connection in publishedProfile.connections {
+            let endpoint = publishedProfile.connectionProfile(connection)
+            if connection.usesXray {
+                let config = Configs.xray(publishedProfile, connection)
+                let object = try JSONSerialization.jsonObject(with: Data(config.utf8)) as! [String: Any]
+                let proxy = (object["outbounds"] as! [[String: Any]])[0]
+                precondition((proxy["settings"] as! [String: Any])["address"] as? String == endpoint.host)
+                let stream = proxy["streamSettings"] as! [String: Any]
+                precondition((stream["tlsSettings"] as! [String: Any])["pinnedPeerCertSha256"] as? String == endpoint.str("hy2.pinSha256"))
+                let file = destination.appendingPathComponent("published-\(connection.id).json")
+                try config.write(to: file, atomically: true, encoding: .utf8)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+            } else {
+                let config = Configs.amnezia(endpoint, endpointIP: endpoint.host)
+                precondition(config.conf.contains("Endpoint = \(endpoint.host):\(endpoint.int("awg.port"))\n"))
+                precondition(config.conf.contains("PrivateKey = \(endpoint.str("awg.privateKey"))\n"))
+                precondition(config.conf.contains("PublicKey = \(endpoint.str("awg.serverPublicKey"))\n"))
+            }
         }
         print("Protocol, credential, pin and legacy migration checks passed")
         print("Loaded profile: \(publishedProfile.connections.count) modes, \(extras.count) additional Xray configs generated")

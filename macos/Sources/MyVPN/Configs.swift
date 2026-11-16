@@ -7,7 +7,7 @@ private let privateNets = [
 
 enum Configs {
     static func xray(_ p: Profile, _ connection: VPNConnection) -> String {
-        if let builtin = connection.builtin { return xray(p, builtin) }
+        if let builtin = connection.builtin { return xray(p.connectionProfile(connection), builtin) }
         return wrap(connection.outbound!)
     }
 

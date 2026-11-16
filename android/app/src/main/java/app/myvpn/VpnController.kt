@@ -104,7 +104,8 @@ object VpnController {
         scope.launch {
             mutex.withLock {
                 stopAll()
-                _status.value = VpnStatus(VpnState.CONNECTING, protocol, host = profile.host)
+                val endpoint = profile.connectionProfile(protocol)
+                _status.value = VpnStatus(VpnState.CONNECTING, protocol, host = endpoint.host)
                 if (protocol.usesXray) {
                     val intent = Intent(app, XrayVpnService::class.java)
                         .setAction(XrayVpnService.ACTION_START)
@@ -113,9 +114,9 @@ object VpnController {
                     ContextCompat.startForegroundService(app, intent)
                 } else {
                     try {
-                        backend.setState(tunnel, Tunnel.State.UP, AwgConfig.build(profile))
+                        backend.setState(tunnel, Tunnel.State.UP, AwgConfig.build(endpoint))
                         wgUp = true
-                        _status.value = VpnStatus(VpnState.UP, protocol, since = System.currentTimeMillis(), host = profile.host)
+                        _status.value = VpnStatus(VpnState.UP, protocol, since = System.currentTimeMillis(), host = endpoint.host)
                     } catch (e: Throwable) {
                         Log.e(TAG, "AmneziaWG connection failed: ${e.javaClass.simpleName}")
                         _status.value = VpnStatus(VpnState.DOWN, protocol, error = describe(e))

@@ -109,7 +109,8 @@ def validate_profile(value, client):
     if "enabledProtocols" in value:
         ids = value["enabledProtocols"]
         if (not isinstance(ids, list) or not ids or not all(isinstance(i, str) for i in ids)
-                or len(set(ids)) != len(ids) or not set(ids) <= {"VLESS_TCP", "HY2", "HY2_OBFS", "AWG"}):
+                or len(set(ids)) != len(ids) or not set(ids) <= {"VLESS_TCP", "HY2", "HY2_OBFS", "AWG"}
+                or not set(ids) & {"HY2", "HY2_OBFS", "AWG"}):
             raise UpdateError("invalid enabled protocols")
     if "additionalServers" in value:
         entries = value["additionalServers"]
@@ -126,6 +127,24 @@ def validate_profile(value, client):
                 raise UpdateError("invalid additional server")
             ids.add(entry["id"])
             validate_profile(entry["profile"], client)
+    if "routes" in value:
+        entries = value["routes"]
+        if not isinstance(entries, list) or not 1 <= len(entries) <= 8:
+            raise UpdateError("invalid routes")
+        ids = set()
+        for entry in entries:
+            if (not isinstance(entry, dict) or set(entry) != {"id", "title", "profile"}
+                    or not isinstance(entry["id"], str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", entry["id"])
+                    or entry["id"] in ids or not isinstance(entry["title"], str)
+                    or not entry["title"].strip() or len(entry["title"]) > 80
+                    or any(ord(c) < 32 or ord(c) == 127 for c in entry["title"])
+                    or not isinstance(entry["profile"], dict)
+                    or any(k in entry["profile"] for k in ["routes", "additionalServers"])):
+                raise UpdateError("invalid route")
+            ids.add(entry["id"])
+            validate_profile(entry["profile"], client)
+            if not set(entry["profile"].get("enabledProtocols", ["HY2", "HY2_OBFS", "AWG"])) & {"HY2", "HY2_OBFS", "AWG"}:
+                raise UpdateError("route has no supported protocol")
     return value
 
 

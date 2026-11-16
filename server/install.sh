@@ -162,7 +162,7 @@ PYVALIDATE
   while (( s1 + 56 == s2 )); do s2=$(rnd 15 150); done
   # H1-H4 — четыре разных значения, не пересекающиеся со стандартными типами WireGuard (1-4).
   mapfile -t hs < <(shuf -i 100000000-2147483647 -n 4)
-  awg_port=$(rnd 30000 60000)
+  awg_port="${AWG_PORT:-$(rnd 30000 60000)}"
 
   # I1 — «сигнатурный» пакет перед рукопожатием, похожий на DNS-запрос www.yandex.ru.
   i1='<r 2><b 0x01000001000000000000037777770679616e6465780272750000010001>'
@@ -223,8 +223,8 @@ PYVALIDATE
 ensure_var() { grep -q "^$1=" "$SERVER_ENV" || echo "$1=$2" >>"$SERVER_ENV"; }
 [[ ${ENABLE_VLESS:-1} == 0 || ${ENABLE_VLESS:-1} == 1 ]] || die "ENABLE_VLESS должен быть 0 или 1"
 ensure_var ENABLE_VLESS "${ENABLE_VLESS:-1}"
-ensure_var HY2_PORT 443
-ensure_var HY2_OBFS_PORT "$(shuf -i 20000-29999 -n 1)"
+ensure_var HY2_PORT "${HY2_PORT:-443}"
+ensure_var HY2_OBFS_PORT "${HY2_OBFS_PORT:-$(shuf -i 20000-29999 -n 1)}"
 ensure_var HY2_SNI "'www.bing.com'"
 ensure_var HY2_OBFS_PASSWORD "'$(openssl rand -hex 16)'"
 ensure_var HY2_CERT "'/usr/local/etc/xray/hy2.crt'"

@@ -11,8 +11,8 @@ enum VPNProtocol: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .vlessTcp: return "VLESS Reality · TCP"
-        case .hy2: return "Hysteria2"
-        case .hy2Obfs: return "Hysteria2 + Salamander"
+        case .hy2: return "Hysteria 2"
+        case .hy2Obfs: return "Hysteria 2 + Salamander"
         case .awg: return "AmneziaWG"
         }
     }
@@ -101,6 +101,7 @@ struct Profile {
         else { throw VPNError("Это не профиль My VPN (нет полей host/vless)") }
         try ProfileValidation.extras(obj["extraXray"])
         try ProfileValidation.catalog(obj)
+        try ProfileValidation.routes(obj)
         return Profile(json: obj)
     }
 }
@@ -123,14 +124,6 @@ enum Fields {
         FieldGroup(title: "Сервер", fields: [
             Field(path: "host", label: "Адрес сервера (IP или домен)"),
             Field(path: "dns", label: "DNS внутри туннеля"),
-        ]),
-        FieldGroup(title: "VLESS + Reality", fields: [
-            Field(path: "vless.uuid", label: "UUID"),
-            Field(path: "vless.sni", label: "SNI (маскировочный сайт)"),
-            Field(path: "vless.publicKey", label: "Public key"),
-            Field(path: "vless.shortId", label: "Short ID"),
-            Field(path: "vless.fingerprint", label: "Fingerprint"),
-            Field(path: "vless.tcpPort", label: "Порт TCP", numeric: true),
         ]),
         FieldGroup(title: "Hysteria2", fields: [
             Field(path: "hy2.port", label: "Порт (UDP)", numeric: true),
@@ -180,13 +173,15 @@ struct VPNConnection: Identifiable, Hashable {
     let subtitle: String
     let builtin: VPNProtocol?
     let outbound: [String: Any]?
+    let routeID: String?
 
-    init(_ proto: VPNProtocol) {
-        id = proto.rawValue
-        title = proto.title
+    init(_ proto: VPNProtocol, routeID: String? = nil, routeTitle: String? = nil) {
+        id = routeID.map { "route-\($0)-\(proto.rawValue)" } ?? proto.rawValue
+        title = routeTitle.map { "\(proto.title) · \($0)" } ?? proto.title
         subtitle = proto.subtitle
         builtin = proto
         outbound = nil
+        self.routeID = routeID
     }
 
     init(id: String, title: String, outbound: [String: Any]) {
@@ -195,6 +190,7 @@ struct VPNConnection: Identifiable, Hashable {
         subtitle = "Дополнительный режим Xray"
         builtin = nil
         self.outbound = outbound
+        routeID = nil
     }
 
     var rawValue: String { id }
@@ -205,12 +201,20 @@ struct VPNConnection: Identifiable, Hashable {
 
 extension Profile {
     var connections: [VPNConnection] {
-        availableProtocols.map(VPNConnection.init) + ((json["extraXray"] as? [[String: Any]]) ?? []).compactMap { entry in
-            guard let id = entry["id"] as? String,
-                  let title = entry["title"] as? String,
-                  let outbound = entry["outbound"] as? [String: Any] else { return nil }
-            return VPNConnection(id: id, title: title, outbound: outbound)
+        let directTitle = (json["routes"] == nil) ? nil : "Финляндия"
+        return availableProtocols.map { VPNConnection($0, routeTitle: directTitle) }
+            + ((json["routes"] as? [[String: Any]]) ?? []).flatMap { entry -> [VPNConnection] in
+            guard let id = entry["id"] as? String, let title = entry["title"] as? String,
+                  let raw = entry["profile"] as? [String: Any] else { return [] }
+            return Profile(json: raw).availableProtocols.map { VPNConnection($0, routeID: id, routeTitle: title) }
         }
+    }
+
+    func connectionProfile(_ connection: VPNConnection) -> Profile {
+        guard let id = connection.routeID,
+              let entry = (json["routes"] as? [[String: Any]])?.first(where: { $0["id"] as? String == id }),
+              let raw = entry["profile"] as? [String: Any] else { return self }
+        return Profile(json: raw)
     }
 }
 
@@ -223,8 +227,9 @@ struct VPNServer: Identifiable {
 
 extension Profile {
     var availableProtocols: [VPNProtocol] {
-        guard let ids = json["enabledProtocols"] as? [String] else { return VPNProtocol.allCases }
-        return ids.compactMap(VPNProtocol.init(rawValue:))
+        let supported: [VPNProtocol] = [.hy2, .hy2Obfs, .awg]
+        guard let ids = json["enabledProtocols"] as? [String] else { return supported }
+        return supported.filter { ids.contains($0.rawValue) }
     }
 
     var servers: [VPNServer] {

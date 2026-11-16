@@ -36,9 +36,10 @@ func run() error {
 		return fmt.Errorf("cannot read bounded profile")
 	}
 	var p struct {
-		Host string
-		DNS  string
-		AWG  map[string]any
+		Host     string
+		ExitHost string
+		DNS      string
+		AWG      map[string]any
 	}
 	if json.Unmarshal(data, &p) != nil {
 		return fmt.Errorf("invalid profile JSON")
@@ -141,7 +142,11 @@ func run() error {
 			if check.Name == "exit_ip" {
 				exit := strings.TrimSpace(string(body))
 				record["ip"] = exit
-				valid = valid && exit == p.Host
+				expected := p.ExitHost
+				if expected == "" {
+					expected = p.Host
+				}
+				valid = valid && exit == expected
 			}
 			record["ok"] = valid
 		}
