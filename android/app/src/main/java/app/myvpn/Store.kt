@@ -52,9 +52,9 @@ class Store internal constructor(
 
     /** Профиль и номер обновления записываем одной транзакцией, активный VPN не трогаем. */
     @Synchronized
-    fun applyUpdate(update: ProfileUpdate): Boolean {
+    fun applyUpdate(update: ProfileUpdate, repair: Boolean = false): Boolean {
         require(update.revision >= appliedRevision) { "Получено устаревшее обновление" }
-        if (update.revision == appliedRevision) return false
+        if (update.revision == appliedRevision && (!repair || profile.toString() == update.profile.toString())) return false
         val previousProfile = prefs.getString(KEY_PROFILE, null)
         val previousRevision = appliedRevision
         val previousRemote = prefs.getString(KEY_REMOTE_PROFILE, null)

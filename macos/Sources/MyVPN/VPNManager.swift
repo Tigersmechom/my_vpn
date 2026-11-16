@@ -19,6 +19,14 @@ final class VPNManager: ObservableObject {
     @Published var results: [SpeedResult]
     @Published var updatingConfiguration = false
     @Published var configurationMessage: String?
+    @Published var availability: [String: AvailabilityResult] = [:]
+    @Published var availabilityMessage: String?
+    private var foreground = false
+    private var stateKnown = false
+    private var monitorTask: Task<Void, Never>?
+    private var feedTask: Task<Void, Never>?
+    private var healthProcess: AvailabilityProcess?
+    private var monitorGeneration = 0
     private let updateBootstrap = UpdateBootstrap.bundled
 
     var connections: [VPNConnection] { store.selectedServer.profile.connections }
@@ -29,24 +37,79 @@ final class VPNManager: ObservableObject {
         selectedServerId = store.selectedServer.id
         selected = store.selectedConnection
         results = store.results()
+        availability = [:]
     }
 
-    func updateConfiguration() async {
+    func updateConfiguration(manual: Bool = true) async {
         guard !updatingConfiguration, let bootstrap = updateBootstrap else { return }
         updatingConfiguration = true
-        configurationMessage = "Проверяю обновления…"
+        if manual { configurationMessage = "Проверяю обновления…" }
         defer { updatingConfiguration = false }
         do {
             let update = try await RemoteUpdates.fetch(bootstrap: bootstrap, highestRevision: store.highestRevision)
-            if update.revision == store.highestRevision {
-                configurationMessage = "У вас актуальная конфигурация (\(update.revision))"
-                return
-            }
-            try store.applyRemote(update.profile, revision: update.revision)
-            reloadProfileChoices()
-            configurationMessage = "Конфигурация \(update.revision) сохранена. Применится при следующем подключении"
+            try Task.checkCancellation()
+            let changed = try store.applyRemote(update.profile, revision: update.revision, repair: manual)
+            if changed {
+                reloadProfileChoices()
+                configurationMessage = "Конфигурация \(update.revision) сохранена. Новые маршруты появились в списке"
+            } else if manual { configurationMessage = "У вас актуальная конфигурация (\(update.revision))" }
         } catch {
-            configurationMessage = error.localizedDescription
+            if !Task.isCancelled { configurationMessage = error.localizedDescription }
+        }
+    }
+
+    func setForeground(_ value: Bool) {
+        foreground = value
+        reconcileMonitoring()
+    }
+
+    private func stopMonitoring() {
+        monitorGeneration += 1
+        monitorTask?.cancel(); monitorTask = nil
+        feedTask?.cancel(); feedTask = nil
+        healthProcess?.stop(); healthProcess = nil
+    }
+
+    private func reconcileMonitoring() {
+        guard foreground && stateKnown && state == .down else { stopMonitoring(); return }
+        guard monitorTask == nil else { return }
+        monitorGeneration += 1
+        let generation = monitorGeneration
+        let process = AvailabilityProcess()
+        healthProcess = process
+        availability = [:]
+        availabilityMessage = nil
+        monitorTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self, self.monitorGeneration == generation else { return }
+                let start = Date()
+                let catalog = self.store.selectedServer.profile
+                let routes: [[String: Any]] = catalog.connections.compactMap { connection in
+                    guard let proto = connection.builtin, proto != .vlessTcp else { return nil }
+                    return ["id": connection.id, "protocol": proto.rawValue, "profile": catalog.connectionProfile(connection).json]
+                }
+                do {
+                    let payload = try JSONSerialization.data(withJSONObject: ["routes": routes])
+                    let values = try await process.check(payload)
+                    guard !Task.isCancelled, self.monitorGeneration == generation, self.state == .down else { return }
+                    guard catalog.serialized() == self.store.selectedServer.profile.serialized() else { continue }
+                    self.availability = Dictionary(uniqueKeysWithValues: values.map { ($0.id, $0) })
+                    self.availabilityMessage = nil
+                } catch {
+                    if !Task.isCancelled { self.availabilityMessage = "Проверка временно недоступна" }
+                }
+                do { try await Task.sleep(nanoseconds: UInt64(max(0.1, 5 - Date().timeIntervalSince(start)) * 1_000_000_000)) }
+                catch { return }
+            }
+        }
+        feedTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self, self.monitorGeneration == generation else { return }
+                let start = Date()
+                await self.updateConfiguration(manual: false)
+                do { try await Task.sleep(nanoseconds: UInt64(max(0.1, 5 - Date().timeIntervalSince(start)) * 1_000_000_000)) }
+                catch { return }
+            }
         }
     }
 
@@ -68,8 +131,12 @@ final class VPNManager: ObservableObject {
     /// Синхронизация с реальным состоянием (VPN мог остаться поднятым с прошлого запуска).
     func refresh() async {
         helperReady = await background { Helper.isReady }
-        guard helperReady else { return }
-        let status = (try? await background { try Helper.run(["status"]) }) ?? "down"
+        if !helperReady { stateKnown = true; reconcileMonitoring(); return }
+        guard let status = try? await background({ try Helper.run(["status"]) }) else {
+            stateKnown = false
+            stopMonitoring()
+            return
+        }
         if status.hasPrefix("xray") || status.hasPrefix("awg") {
             if state != .up { state = .up; since = since ?? Date() }
             if activeProtocol == nil { activeProtocol = selected }
@@ -77,6 +144,8 @@ final class VPNManager: ObservableObject {
             state = .down
             activeProtocol = nil
         }
+        stateKnown = true
+        reconcileMonitoring()
     }
 
     func installHelper() async {
@@ -100,6 +169,8 @@ final class VPNManager: ObservableObject {
         guard state == .down, let server = servers.first(where: { $0.id == id }) else { return }
         store.selectedServer = server
         reloadProfileChoices()
+        stopMonitoring()
+        reconcileMonitoring()
     }
 
     func toggle() {
@@ -114,6 +185,7 @@ final class VPNManager: ObservableObject {
         selected = proto
         store.selectedConnection = proto
         error = nil
+        stopMonitoring()
         state = .connecting
         activeProtocol = proto
         activeServerHost = profile.host
@@ -142,6 +214,7 @@ final class VPNManager: ObservableObject {
             self.error = error.localizedDescription
             state = .down
             activeProtocol = nil
+            reconcileMonitoring()
         }
     }
 
@@ -150,6 +223,7 @@ final class VPNManager: ObservableObject {
         state = .down
         activeProtocol = nil
         since = nil
+        reconcileMonitoring()
     }
 
     /// Синхронная остановка при выходе из приложения, чтобы не оставить чужие DNS и маршруты.

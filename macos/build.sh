@@ -49,6 +49,9 @@ if [[ ! -x $VENDOR/awg ]]; then
   cp "$VENDOR/src-awg-tools/src/wg" "$VENDOR/awg"
 fi
 
+step "Проверка доступности"
+bash ../health/build.sh mac
+
 step "Swift"
 swift build -c release --arch arm64
 BIN="$(swift build -c release --arch arm64 --show-bin-path)/MyVPN"
@@ -66,7 +69,8 @@ PROFILE=../config/mac.json
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/MyVPN"
-cp "$VENDOR/xray" "$VENDOR/amneziawg-go" "$VENDOR/awg" helper/myvpn-helper helper/install-helper.sh "$APP/Contents/Resources/"
+cp "$VENDOR/xray" "$VENDOR/amneziawg-go" "$VENDOR/awg" "$VENDOR/health-core" helper/myvpn-helper helper/install-helper.sh "$APP/Contents/Resources/"
+cp ../health/THIRD_PARTY_NOTICES.txt "$APP/Contents/Resources/health-notices.txt"
 cp "$PROFILE" "$APP/Contents/Resources/default_profile.json"
 if [[ -f ../config/mac-update.json ]]; then
   cp ../config/mac-update.json "$APP/Contents/Resources/update_bootstrap.json"
@@ -83,8 +87,8 @@ cat >"$APP/Contents/Info.plist" <<'EOF'
   <key>CFBundleExecutable</key><string>MyVPN</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.4.0</string>
-  <key>CFBundleVersion</key><string>6</string>
+  <key>CFBundleShortVersionString</key><string>1.5.0</string>
+  <key>CFBundleVersion</key><string>7</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>

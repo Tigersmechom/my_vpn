@@ -71,11 +71,14 @@ final class Store {
     var resetTarget: Profile { storedProfile(state["remoteProfile"]) ?? defaultProfile }
     func resetProfile() { profile = resetTarget }
 
-    func applyRemote(_ profile: Profile, revision: Int) throws {
-        guard revision > highestRevision else { throw VPNError("Повторное или устаревшее обновление") }
+    @discardableResult
+    func applyRemote(_ profile: Profile, revision: Int, repair: Bool = false) throws -> Bool {
+        guard revision >= highestRevision else { throw VPNError("Устаревшее обновление") }
+        if revision == highestRevision && (!repair || self.profile.serialized() == profile.serialized()) { return false }
         let next: [String: Any] = ["profile": profile.json, "remoteProfile": profile.json, "revision": revision]
         let data = try JSONSerialization.data(withJSONObject: next, options: [.sortedKeys])
         defaults.set(data, forKey: "profileState")
+        return true
     }
 
     var selectedServer: VPNServer {

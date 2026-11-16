@@ -51,6 +51,22 @@ enum RouteChecks {
                 }
             }
         }
+        let suite = "app.myvpn.dynamic-routes.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = Store(defaults: defaults)
+        try store.applyRemote(try ProfileValidation.profile(base), revision: 1)
+        let activeSnapshot = store.profile
+        try store.applyRemote(parsed, revision: 2)
+        precondition(store.profile.connections.count == 9 && activeSnapshot.connections.count == 3)
+        store.selectedConnection = parsed.connections.last!
+        var reduced = catalog
+        var renamed = entries[0]; renamed["title"] = "Новое название"
+        reduced["routes"] = [renamed]
+        try store.applyRemote(try ProfileValidation.profile(reduced), revision: 3)
+        precondition(store.profile.connections.count == 6 && store.profile.connections.last!.title.contains("Новое название"))
+        precondition(store.selectedConnection.id == "HY2")
+        precondition(parsed.connections.count == 9)
         for bad: Any in [[], [entries[0], entries[0]], [["id": "bad", "title": "bad\nname", "profile": poland]],
                          [["id": "nested", "title": "Nested", "profile": catalog]], [["id": "bad", "title": "Missing", "profile": ["client": "android"]]]] {
             var invalid = catalog; invalid["routes"] = bad

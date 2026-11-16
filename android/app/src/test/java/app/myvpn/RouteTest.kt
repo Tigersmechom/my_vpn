@@ -50,6 +50,37 @@ class RouteTest {
         }
     }
 
+    @Test fun newAndRemovedRoutesAppearFromDataInTheSameApplication() {
+        val initial = Profile.parse(base().toString())
+        val store = Store(MemoryPreferences(), { initial }, { null })
+        store.applyUpdate(ProfileUpdate(1, initial))
+        val activeSnapshot = store.profile
+        val updated = Profile.parse(catalog().toString())
+        assertTrue(store.applyUpdate(ProfileUpdate(2, updated)))
+        assertEquals(9, store.profile.protocols.size)
+        assertEquals(3, activeSnapshot.protocols.size)
+        store.protocol = store.profile.protocols.last()
+        val changed = catalog()
+        changed.getJSONArray("routes").remove(1)
+        changed.getJSONArray("routes").getJSONObject(0).put("title", "Новое название")
+        store.applyUpdate(ProfileUpdate(3, Profile.parse(changed.toString())))
+        assertEquals(6, store.profile.protocols.size)
+        assertTrue(store.profile.protocols.last().title.contains("Новое название"))
+        assertEquals("HY2", store.protocol.name)
+        assertEquals(9, updated.protocols.size)
+    }
+
+    @Test fun healthPeersCannotReuseTheMainClientIdentity() {
+        val probe = JSONObject().put("privateKey", "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=")
+            .put("presharedKey", "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=").put("address", "10.77.77.99/32")
+        val valid = base().put("probeAwg", probe)
+        Profile.parse(valid.toString())
+        probe.put("address", "10.77.77.2/32")
+        assertThrows(Exception::class.java) { Profile.parse(valid.toString()) }
+        probe.put("address", "10.77.77.99/32").put("privateKey", valid.getJSONObject("awg").getString("privateKey"))
+        assertThrows(Exception::class.java) { Profile.parse(valid.toString()) }
+    }
+
     @Test fun malformedNestedAndCrossDeviceRoutesAreRejected() {
         val duplicate = catalog().also { it.getJSONArray("routes").put(it.getJSONArray("routes").getJSONObject(0)) }
         val nested = catalog().also { it.getJSONArray("routes").getJSONObject(0).put("profile", catalog()) }

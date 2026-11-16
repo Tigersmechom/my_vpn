@@ -2,6 +2,10 @@ package app.myvpn
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+import java.util.concurrent.atomic.AtomicReference
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URL
@@ -105,13 +109,28 @@ object ProfileUpdater {
         Thread(task, "vpn-update-deadline").apply { isDaemon = true }
     }
 
-    suspend fun refresh(store: Store): Boolean = withContext(Dispatchers.IO) {
-        val bootstrap = store.bootstrap ?: error("Обновления не настроены в этой сборке")
-        // Приложение исключено из Xray VPN, поэтому используем его локальный SOCKS.
-        val status = VpnController.status.value
-        val socksPort = status.socksPort.takeIf { status.state == VpnState.UP && status.protocol?.usesXray == true } ?: 0
-        val update = download(bootstrap, store.appliedRevision, socksPort)
-        store.applyUpdate(update)
+    private val downloads = Executors.newFixedThreadPool(2) { task -> Thread(task, "vpn-update").apply { isDaemon = true } }
+    private class Cancellation {
+        val cancelled = AtomicBoolean(false)
+        val connection = AtomicReference<HttpsURLConnection?>()
+        fun cancel() { cancelled.set(true); connection.getAndSet(null)?.disconnect() }
+        fun ensureActive() { if (cancelled.get()) throw java.util.concurrent.CancellationException() }
+    }
+
+    suspend fun refresh(store: Store, repair: Boolean = true): Boolean = suspendCancellableCoroutine { continuation ->
+        val cancellation = Cancellation()
+        continuation.invokeOnCancellation { cancellation.cancel() }
+        downloads.execute {
+            try {
+                cancellation.ensureActive()
+                val bootstrap = store.bootstrap ?: error("Обновления не настроены в этой сборке")
+                val status = VpnController.status.value
+                val socksPort = status.socksPort.takeIf { status.state == VpnState.UP && status.protocol?.usesXray == true } ?: 0
+                val update = download(bootstrap, store.appliedRevision, socksPort) { url, port -> fetch(url, port, cancellation) }
+                cancellation.ensureActive()
+                if (continuation.isActive) continuation.resume(store.applyUpdate(update, repair))
+            } catch (e: Exception) { if (continuation.isActive) continuation.resumeWithException(e) }
+        }
     }
 
     /** При недоступном старом сервере пробуем HTTPS напрямую, не останавливая туннель. */
@@ -131,10 +150,15 @@ object ProfileUpdater {
         return UpdateEnvelope.decode(bytes, bootstrap, appliedRevision)
     }
 
-    private fun fetch(url: String, socksPort: Int): ByteArray {
+    private fun fetch(url: String, socksPort: Int): ByteArray = fetch(url, socksPort, Cancellation())
+
+    private fun fetch(url: String, socksPort: Int, cancellation: Cancellation): ByteArray {
+        cancellation.ensureActive()
         val proxy = if (socksPort > 0) java.net.Proxy(java.net.Proxy.Type.SOCKS, java.net.InetSocketAddress("127.0.0.1", socksPort))
             else java.net.Proxy.NO_PROXY
         val connection = URL(cacheBustedUpdateUrl(url)).openConnection(proxy) as HttpsURLConnection
+        cancellation.connection.set(connection)
+        cancellation.ensureActive()
         val expired = AtomicBoolean(false)
         val deadline = deadlines.schedule({
             expired.set(true)
@@ -153,6 +177,7 @@ object ProfileUpdater {
                 val output = java.io.ByteArrayOutputStream()
                 val buffer = ByteArray(8192)
                 while (true) {
+                    cancellation.ensureActive()
                     if (expired.get()) throw SocketTimeoutException()
                     val count = input.read(buffer)
                     if (count < 0) break
@@ -163,6 +188,7 @@ object ProfileUpdater {
             }
         } finally {
             deadline.cancel(false)
+            cancellation.connection.compareAndSet(connection, null)
             connection.disconnect()
         }
     }

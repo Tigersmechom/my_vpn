@@ -99,6 +99,7 @@ struct Profile {
         guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               obj["host"] != nil, obj["vless"] != nil
         else { throw VPNError("Это не профиль My VPN (нет полей host/vless)") }
+        try ProfileValidation.probeKeys(obj)
         try ProfileValidation.extras(obj["extraXray"])
         try ProfileValidation.catalog(obj)
         try ProfileValidation.routes(obj)
@@ -201,7 +202,7 @@ struct VPNConnection: Identifiable, Hashable {
 
 extension Profile {
     var connections: [VPNConnection] {
-        let directTitle = (json["routes"] == nil) ? nil : "Финляндия"
+        let directTitle = (json["routes"] == nil) ? nil : (str("serverTitle").isEmpty ? "Напрямую" : str("serverTitle"))
         return availableProtocols.map { VPNConnection($0, routeTitle: directTitle) }
             + ((json["routes"] as? [[String: Any]]) ?? []).flatMap { entry -> [VPNConnection] in
             guard let id = entry["id"] as? String, let title = entry["title"] as? String,

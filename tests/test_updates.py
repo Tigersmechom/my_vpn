@@ -32,6 +32,22 @@ def bootstrap(client="android"):
 
 
 class UpdateCryptoTests(unittest.TestCase):
+    def test_health_peer_is_dedicated_and_authenticated(self):
+        p = fixture()
+        probe = {"privateKey": base64.b64encode(bytes([9]) * 32).decode(),
+                 "presharedKey": base64.b64encode(bytes([8]) * 32).decode(),
+                 "address": "10.77.77.99/32"}
+        p["probeAwg"] = probe
+        encoded = updates.encrypt_update(p, bootstrap(), 1)
+        self.assertEqual(updates.decrypt_update(encoded, bootstrap())["profile"]["probeAwg"], probe)
+        for fields in ({"privateKey": p["awg"]["privateKey"]}, {"address": p["awg"]["address"]},
+                       {"address": "10.77.77.99/24"}, {"address": "999.1.2.3/32"},
+                       {"privateKey": "bad"}, {"unexpected": "field"}):
+            candidate = copy.deepcopy(p)
+            candidate["probeAwg"].update(fields)
+            with self.assertRaises(updates.UpdateError):
+                updates.encrypt_update(candidate, bootstrap(), 1)
+
     def test_routes_roundtrip_and_reject_nested_or_cross_device_profiles(self):
         p = fixture("mac")
         p["enabledProtocols"] = ["HY2", "HY2_OBFS", "AWG"]

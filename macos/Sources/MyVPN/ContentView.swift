@@ -21,6 +21,8 @@ struct ContentView: View {
                 .disabled(vpn.state != .down)
                 statusCard
                 section("Протокол")
+                Text(vpn.availabilityMessage ?? "В открытом окне без VPN: проверка каждые 5 с. Задержка HTTPS, не скорость загрузки.")
+                    .font(.caption).foregroundStyle(.secondary)
                 VStack(spacing: 6) {
                     ForEach(vpn.connections) { p in protocolRow(p) }
                 }
@@ -41,6 +43,8 @@ struct ContentView: View {
             .padding(20)
         }
         .frame(width: 520, height: 820)
+        .background(ForegroundWindow { vpn.setForeground($0) })
+        .onDisappear { vpn.setForeground(false) }
         .toolbar {
             Button { openWindow(id: "desktop-us") } label: { Label("Рабочий стол США", systemImage: "display") }
             Button { showSettings = true } label: { Label("Настройки сервера", systemImage: "gearshape") }
@@ -114,6 +118,8 @@ struct ContentView: View {
 
     private func protocolRow(_ p: VPNConnection) -> some View {
         let selected = vpn.selected == p
+        let result = vpn.availability[p.id]
+        let fresh = vpn.state == .down && result.map { Date().timeIntervalSince1970 * 1000 - $0.checkedAt < 15_000 } == true
         return Button { vpn.select(p) } label: {
             HStack(spacing: 10) {
                 Image(systemName: selected ? "largecircle.fill.circle" : "circle")
@@ -121,13 +127,20 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(p.title).fontWeight(.medium)
                     Text(p.subtitle).font(.caption).foregroundStyle(.secondary)
+                    if let result, fresh {
+                        Text(result.label).font(.caption.weight(.semibold))
+                        Text(result.detail).font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Text(vpn.state == .down ? "Ожидание проверки…" : "Проверки приостановлены на время VPN").font(.caption).foregroundStyle(.secondary)
+                    }
                 }
                 Spacer()
             }
             .padding(10)
             .contentShape(Rectangle())
-            .background(selected ? Color.accentColor.opacity(0.12) : Color.secondary.opacity(0.06),
+            .background(fresh ? (result?.color ?? .yellow).opacity(0.24) : Color.yellow.opacity(vpn.state == .down ? 0.10 : 0.03),
                         in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(selected ? Color.accentColor : .clear, lineWidth: 2))
         }
         .buttonStyle(.plain)
     }

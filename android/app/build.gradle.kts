@@ -34,6 +34,7 @@ val generatedAssets = layout.buildDirectory.dir("generated/defaultProfile")
 val copyDefaultProfile by tasks.registering(Sync::class) {
     from(profileSource) { rename { "default_profile.json" } }
     from(rootProject.file("../config/android-update.json")) { rename { "update_bootstrap.json" } }
+    from(rootProject.file("../health/THIRD_PARTY_NOTICES.txt")) { rename { "health-notices.txt" } }
     into(generatedAssets)
 }
 
@@ -45,8 +46,8 @@ android {
         applicationId = "app.myvpn"
         minSdk = 24
         targetSdk = 35
-        versionCode = 4
-        versionName = "1.3.0"
+        versionCode = 5
+        versionName = "1.4.0"
     }
 
     splits {
@@ -93,7 +94,13 @@ kotlin {
     jvmToolchain(17)
 }
 
-tasks.named("preBuild") { dependsOn(copyDefaultProfile) }
+val buildHealthCore by tasks.registering(Exec::class) {
+    workingDir(rootProject.file("../health"))
+    commandLine("bash", "build.sh", "android")
+    inputs.dir(rootProject.file("../health"))
+    outputs.dir(file("src/main/jniLibs"))
+}
+tasks.named("preBuild") { dependsOn(copyDefaultProfile, buildHealthCore) }
 
 dependencies {
     implementation(files(xrayAar))

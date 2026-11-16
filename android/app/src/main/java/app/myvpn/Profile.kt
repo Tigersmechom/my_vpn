@@ -51,7 +51,8 @@ class Profile(val json: JSONObject) {
         return Protocol.supported.filter { it.name in ids }
     }
     val protocols: List<Protocol> get() {
-        val direct = directProtocols.map { if (json.has("routes")) it.copy(title = "${it.title} · Финляндия") else it }
+        val directTitle = str("serverTitle").ifBlank { "Напрямую" }
+        val direct = directProtocols.map { if (json.has("routes")) it.copy(title = "${it.title} · $directTitle") else it }
         val routes = json.optJSONArray("routes") ?: return direct
         return direct + (0 until routes.length()).flatMap { i ->
             val route = routes.getJSONObject(i)

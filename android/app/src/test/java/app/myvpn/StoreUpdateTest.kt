@@ -20,6 +20,21 @@ class StoreUpdateTest {
         assertThrows(IllegalArgumentException::class.java) { store.applyUpdate(ProfileUpdate(6, profile("192.0.2.4"))) }
     }
 
+    @Test fun manualRefreshRepairsSameRevisionWithoutRollbackOrChangingSnapshot() {
+        val store = store()
+        val update = ProfileUpdate(7, profile("192.0.2.2"))
+        store.applyUpdate(update)
+        store.profile = profile("edited.example")
+        val activeSnapshot = store.profile
+        assertFalse(store.applyUpdate(update))
+        assertEquals("edited.example", store.profile.host)
+        assertTrue(store.applyUpdate(update, repair = true))
+        assertEquals("192.0.2.2", store.profile.host)
+        assertEquals("edited.example", activeSnapshot.host)
+        assertFalse(store.applyUpdate(update, repair = true))
+        assertThrows(IllegalArgumentException::class.java) { store.applyUpdate(ProfileUpdate(6, profile("old.example")), repair = true) }
+    }
+
     @Test fun failedDiskWriteRestoresProfileSnapshotAndRevision() {
         val prefs = MemoryPreferences()
         val store = store(prefs)
@@ -51,7 +66,7 @@ class StoreUpdateTest {
 }
 
 /** Models Android's commit behavior: in-memory state changes even if disk write fails. */
-private class MemoryPreferences : SharedPreferences {
+internal class MemoryPreferences : SharedPreferences {
     private val data = mutableMapOf<String, Any?>()
     var failNextCommit = false
     override fun getAll(): MutableMap<String, *> = data.toMutableMap()

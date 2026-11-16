@@ -32,3 +32,6 @@ linux/vendor/
 
 # Локальное окружение инструмента публикации обновлений.
 .venv/
+
+# Bundled rootless health executables are built from health/.
+android/app/src/main/jniLibs/

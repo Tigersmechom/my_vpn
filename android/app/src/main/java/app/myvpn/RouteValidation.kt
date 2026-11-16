@@ -6,6 +6,18 @@ import org.json.JSONObject
 /** A route carries data for existing cores only; nested routes and country catalogs are rejected. */
 object RouteValidation {
     fun validate(json: JSONObject) {
+        if (json.has("probeAwg")) {
+            val probe = json.getJSONObject("probeAwg")
+            require(probe.keys().asSequence().toSet() == setOf("privateKey", "presharedKey", "address")) { "Некорректные ключи проверки" }
+            for (key in listOf("privateKey", "presharedKey")) {
+                require(runCatching { kotlin.io.encoding.Base64.decode(probe.getString(key)).size == 32 }.getOrDefault(false)) { "Некорректный ключ проверки" }
+            }
+            val address = probe.getString("address")
+            require(address.matches(Regex("[0-9]{1,3}(\\.[0-9]{1,3}){3}/32")) &&
+                address.substringBefore('/').split('.').all { it.toInt() <= 255 }) { "Некорректный адрес проверки" }
+            val awg = json.getJSONObject("awg")
+            require(probe.getString("privateKey") != awg.getString("privateKey") && address.substringBefore('/') != awg.getString("address").substringBefore('/')) { "Для проверки нужен отдельный ключ" }
+        }
         if (json.has("enabledProtocols")) {
             val list = json.optJSONArray("enabledProtocols") ?: error("Некорректный список протоколов")
             val ids = (0 until list.length()).map { list.getString(it) }

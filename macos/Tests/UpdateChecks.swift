@@ -124,6 +124,13 @@ enum UpdateChecks {
         do { try store.applyRemote(profile, revision: 1); preconditionFailure("Rollback saved") } catch { }
         precondition(store.highestRevision == 2 && store.profile.connections.count == 3)
         store.profile = profile.with(["host": "edited.example.com"])
+        let automaticSame = try store.applyRemote(update.profile, revision: 2)
+        precondition(!automaticSame)
+        precondition(store.profile.host == "edited.example.com")
+        let repaired = try store.applyRemote(update.profile, revision: 2, repair: true)
+        precondition(repaired && store.profile.host == update.profile.host && store.highestRevision == 2)
+        let unchanged = try store.applyRemote(update.profile, revision: 2, repair: true)
+        precondition(!unchanged)
         store.resetProfile()
         precondition(store.highestRevision == 2 && store.profile.connections.count == 3)
 

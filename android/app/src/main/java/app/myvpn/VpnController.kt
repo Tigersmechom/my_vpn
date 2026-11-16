@@ -101,6 +101,7 @@ object VpnController {
     }
 
     fun connect(profile: Profile, protocol: Protocol) {
+        AvailabilityProcess.stopAll()
         scope.launch {
             mutex.withLock {
                 stopAll()

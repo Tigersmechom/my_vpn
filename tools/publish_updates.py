@@ -9,6 +9,7 @@ import base64
 import binascii
 import importlib.util
 import json
+import ipaddress
 import os
 import re
 from pathlib import Path
@@ -106,6 +107,21 @@ def validate_profile(value, client):
     except (ValueError, TypeError, KeyError, AttributeError):
         # Exporter's diagnostics can include arbitrary imported field names.
         raise UpdateError("profile has missing or invalid connection fields") from None
+    if "probeAwg" in value:
+        probe = _object(value["probeAwg"], "health peer")
+        if set(probe) != {"privateKey", "presharedKey", "address"}:
+            raise UpdateError("invalid health peer fields")
+        for name in ("privateKey", "presharedKey"):
+            _decode64(probe.get(name), "health key", 32)
+        try:
+            address = ipaddress.IPv4Interface(probe["address"])
+            if address.network.prefixlen != 32:
+                raise ValueError()
+        except (ValueError, TypeError, KeyError):
+            raise UpdateError("invalid health peer address") from None
+        if (probe["privateKey"] == value["awg"]["privateKey"]
+                or address.ip == ipaddress.IPv4Interface(value["awg"]["address"]).ip):
+            raise UpdateError("health checks require a dedicated peer")
     if "enabledProtocols" in value:
         ids = value["enabledProtocols"]
         if (not isinstance(ids, list) or not ids or not all(isinstance(i, str) for i in ids)

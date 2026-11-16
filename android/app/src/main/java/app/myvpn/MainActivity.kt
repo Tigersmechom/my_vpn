@@ -56,6 +56,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -75,6 +76,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -86,6 +90,12 @@ private val Amber = Color(0xFFF59E0B)
 
 class MainActivity : ComponentActivity() {
     private lateinit var store: Store
+    private var foreground by mutableStateOf(false)
+    private var resumed = false
+
+    override fun onResume() { super.onResume(); resumed = true; foreground = hasWindowFocus() }
+    override fun onPause() { AvailabilityProcess.stopAll(); foreground = false; resumed = false; super.onPause() }
+    override fun onWindowFocusChanged(hasFocus: Boolean) { super.onWindowFocusChanged(hasFocus); if (!hasFocus) AvailabilityProcess.stopAll(); foreground = resumed && hasFocus }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -99,7 +109,7 @@ class MainActivity : ComponentActivity() {
             ) {
                 var screen by remember { mutableStateOf("home") }
                 when (screen) {
-                    "home" -> HomeScreen(store, onSettings = { screen = "settings" })
+                    "home" -> HomeScreen(store, foreground, onSettings = { screen = "settings" })
                     else -> SettingsScreen(store, onBack = { screen = "home" })
                 }
             }
@@ -111,7 +121,7 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun HomeScreen(store: Store, onSettings: () -> Unit) {
+private fun HomeScreen(store: Store, foreground: Boolean, onSettings: () -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val status by VpnController.status.collectAsState()
     var protocol by remember { mutableStateOf(store.protocol) }
@@ -124,7 +134,54 @@ private fun HomeScreen(store: Store, onSettings: () -> Unit) {
     var testError by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
-    fun doConnect() = VpnController.connect(store.profile, protocol)
+    var health by remember { mutableStateOf<AvailabilityProcess?>(null) }
+    var availability by remember { mutableStateOf<Map<String, AvailabilityResult>>(emptyMap()) }
+    var availabilityMessage by remember { mutableStateOf<String?>(null) }
+    val active = foreground && status.state == VpnState.DOWN
+    DisposableEffect(active) {
+        onDispose { health?.stop() }
+    }
+    LaunchedEffect(active) {
+        if (!active) { health?.stop(); health = null; return@LaunchedEffect }
+        val process = AvailabilityProcess(context.applicationContext)
+        health = process
+        availability = emptyMap()
+        try {
+            coroutineScope {
+                launch {
+                    while (isActive) {
+                        val start = android.os.SystemClock.elapsedRealtime()
+                        if (!refreshing) {
+                            refreshing = true
+                            try {
+                                if (ProfileUpdater.refresh(store, repair = false)) {
+                                    profile = store.profile; protocol = store.protocol; availability = emptyMap()
+                                    refreshMessage = "Конфигурация обновлена. Новые маршруты появились в списке."
+                                }
+                            } catch (e: CancellationException) { throw e }
+                            catch (e: Exception) { refreshMessage = e.message }
+                            finally { refreshing = false }
+                        }
+                        delay(maxOf(100L, 5_000 - (android.os.SystemClock.elapsedRealtime() - start)))
+                    }
+                }
+                launch {
+                    while (isActive) {
+                        val start = android.os.SystemClock.elapsedRealtime()
+                        val snapshot = profile
+                        try {
+                            val values = process.check(snapshot)
+                            if (snapshot.toString() == profile.toString()) { availability = values; availabilityMessage = null }
+                        } catch (e: CancellationException) { throw e }
+                        catch (e: Exception) { availabilityMessage = e.message }
+                        delay(maxOf(100L, 5_000 - (android.os.SystemClock.elapsedRealtime() - start)))
+                    }
+                }
+            }
+        } finally { process.stop() }
+    }
+
+    fun doConnect() { health?.stop(); VpnController.connect(store.profile, protocol) }
 
     val notifPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
     val vpnPermission = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
@@ -160,8 +217,9 @@ private fun HomeScreen(store: Store, onSettings: () -> Unit) {
             }
 
             item { SectionTitle("Протокол") }
+            item { Text(availabilityMessage ?: "В открытом приложении без VPN: проверка каждые 5 с. Задержка HTTPS, не скорость загрузки.", style = MaterialTheme.typography.bodySmall) }
             items(profile.protocols, key = { it.name }) { p ->
-                ProtocolRow(p, selected = p.name == protocol.name) {
+                ProtocolRow(p, selected = p.name == protocol.name, availability = availability[p.name]?.takeIf { active && System.currentTimeMillis() - it.checkedAt < 15_000 }, paused = !active) {
                     if (p == protocol) return@ProtocolRow
                     protocol = p
                     store.protocol = p
@@ -181,6 +239,7 @@ private fun HomeScreen(store: Store, onSettings: () -> Unit) {
                                     .onSuccess { changed ->
                                         profile = store.profile
                                         protocol = store.protocol
+                                        availability = emptyMap()
                                         refreshMessage = if (changed) "Конфигурация обновлена. Применится при следующем подключении."
                                             else "Уже установлена последняя конфигурация."
                                     }
@@ -243,7 +302,7 @@ private fun HomeScreen(store: Store, onSettings: () -> Unit) {
 
             if (results.isNotEmpty()) {
                 item { SectionTitle("Сравнение (среднее по последним 3 замерам)") }
-                item { ComparisonTable(results) }
+                item { ComparisonTable(results, profile.protocols) }
                 item {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         SectionTitle("История", Modifier.weight(1f))
@@ -317,13 +376,16 @@ private fun StatusCard(status: VpnStatus, host: String, onToggle: () -> Unit) {
 }
 
 @Composable
-private fun ProtocolRow(p: Protocol, selected: Boolean, onClick: () -> Unit) {
+private fun ProtocolRow(p: Protocol, selected: Boolean, availability: AvailabilityResult?, paused: Boolean, onClick: () -> Unit) {
     Card(
         onClick = onClick,
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
-            containerColor = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
-            else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+            containerColor = (when (availability?.grade) {
+                "green" -> Green
+                "red" -> Color(0xFFEF4444)
+                else -> Amber
+            }).copy(alpha = if (paused) 0.04f else 0.22f)
         ),
     ) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -331,18 +393,20 @@ private fun ProtocolRow(p: Protocol, selected: Boolean, onClick: () -> Unit) {
             Column(Modifier.padding(start = 4.dp)) {
                 Text(p.title, fontWeight = FontWeight.Medium)
                 Text(p.subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(availability?.label ?: if (paused) "Проверки приостановлены" else "Ожидание проверки…", style = MaterialTheme.typography.labelMedium)
+                availability?.let { Text(it.detail, style = MaterialTheme.typography.bodySmall) }
             }
         }
     }
 }
 
 @Composable
-private fun ComparisonTable(results: List<SpeedResult>) {
+private fun ComparisonTable(results: List<SpeedResult>, protocols: List<Protocol>) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             TableRow("Протокол", "Пинг", "↓ Мбит/с", "↑ Мбит/с", header = true)
             HorizontalDivider()
-            for (p in (Protocol.entries + results.map { it.protocol }).distinctBy { it.name }) {
+            for (p in (protocols + results.map { it.protocol }).distinctBy { it.name }) {
                 val title = p.title
                 val last = results.filter { it.protocol.name == p.name }.take(3)
                 if (last.isEmpty()) {

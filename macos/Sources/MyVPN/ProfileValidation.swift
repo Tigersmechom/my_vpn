@@ -46,10 +46,22 @@ enum ProfileValidation {
             _ = try integer(awg[key], minimum: 0)
         }
         for key in ["h1", "h2", "h3", "h4"] { try require("awg.\(key)") }
+        try probeKeys(json)
         try extras(json["extraXray"])
         try catalog(json)
         try routes(json)
         return p
+    }
+
+    static func probeKeys(_ json: [String: Any]) throws {
+        guard let raw = json["probeAwg"] else { return }
+        guard let probe = raw as? [String: String], Set(probe.keys) == ["privateKey", "presharedKey", "address"],
+              Data(base64Encoded: probe["privateKey"] ?? "")?.count == 32,
+              Data(base64Encoded: probe["presharedKey"] ?? "")?.count == 32,
+              let address = probe["address"], address.range(of: "^[0-9]{1,3}(\\.[0-9]{1,3}){3}/32$", options: .regularExpression) != nil,
+              address.split(separator: "/")[0].split(separator: ".").allSatisfy({ Int($0).map { $0 <= 255 } == true }),
+              let awg = json["awg"] as? [String: Any], probe["privateKey"] != awg["privateKey"] as? String,
+              address.split(separator: "/").first != (awg["address"] as? String)?.split(separator: "/").first else { throw VPNError("Некорректный отдельный ключ проверки AmneziaWG") }
     }
 
     static func routes(_ json: [String: Any]) throws {
