@@ -86,6 +86,30 @@ class ProfileConfigTest {
         XrayConfig.build(sample(), Protocol.AWG, 10808)
     }
 
+    @Test fun tunDnsUsesHttpsThroughProxyAndPrecedesLocalBypassRules() {
+        for (mode in listOf(Protocol.HY2, Protocol.HY2_OBFS, Protocol.VLESS_TCP)) {
+            val config = JSONObject(XrayConfig.build(sample(), mode, 10808))
+            val dns = config.getJSONObject("dns")
+            assertTrue(dns.getBoolean("disableFallback"))
+            assertEquals("UseIPv4", dns.getString("queryStrategy"))
+            assertTrue(dns.getJSONArray("servers").getString(0).startsWith("https://"))
+            val rules = config.getJSONObject("routing").getJSONArray("rules")
+            assertEquals("53", rules.getJSONObject(0).getString("port"))
+            assertEquals("dns-out", rules.getJSONObject(0).getString("outboundTag"))
+            assertEquals(dns.getString("tag"), rules.getJSONObject(1).getJSONArray("inboundTag").getString(0))
+            assertEquals("proxy", rules.getJSONObject(1).getString("outboundTag"))
+            val outbounds = config.getJSONArray("outbounds")
+            val dnsOut = (0 until outbounds.length()).map { outbounds.getJSONObject(it) }.first { it.getString("tag") == "dns-out" }
+            assertEquals("dns", dnsOut.getString("protocol"))
+            assertFalse(dnsOut.has("proxySettings"))
+            assertEquals("proxy", dnsOut.getJSONObject("streamSettings").getJSONObject("sockopt").getString("dialerProxy"))
+            val policy = dnsOut.getJSONObject("settings").getJSONArray("rules")
+            val ipv6 = (0 until policy.length()).map { policy.getJSONObject(it) }.first { it.optInt("qType") == 28 }
+            assertEquals("return", ipv6.getString("action"))
+            assertEquals(0, ipv6.getInt("rCode"))
+        }
+    }
+
     @Test fun amneziaParserRetainsAwg2ObfuscationAndIpv4Route() {
         val config = AwgConfig.build(sample())
         val iface = config.`interface`

@@ -40,6 +40,7 @@ class AvailabilityProcess(private val context: Context) {
         fun stopAll() { active.toList().forEach { it.stop() } }
     }
     init { active.add(this) }
+    private val native = XrayAvailability(context)
     private val lock = Any()
     private var child: Process? = null
     private var stopped = false
@@ -51,11 +52,21 @@ class AvailabilityProcess(private val context: Context) {
             child?.destroy()
             child = null
         }
+        native.stop()
         active.remove(this)
         executor.shutdownNow()
     }
 
-    suspend fun check(profile: Profile): Map<String, AvailabilityResult> = suspendCancellableCoroutine { continuation ->
+    suspend fun check(profile: Profile): Map<String, AvailabilityResult> = checkStandard(profile)
+
+    suspend fun checkExtra(profile: Profile, publish: (String, AvailabilityResult) -> Unit) {
+        for (mode in profile.protocols.filter { it.customOutbound != null }) {
+            val result = native.check(profile, mode)
+            publish(mode.name, result)
+        }
+    }
+
+    private suspend fun checkStandard(profile: Profile): Map<String, AvailabilityResult> = suspendCancellableCoroutine { continuation ->
         continuation.invokeOnCancellation { stop() }
         executor.execute {
             try {

@@ -26,6 +26,7 @@ data class Protocol(
             (profile?.protocols ?: supported).let { modes -> modes.firstOrNull { it.name == name } ?: modes.first() }
 
         fun history(name: String, title: String): Protocol? = entries.firstOrNull { it.name == name }
+            ?: name.takeIf { it.matches(Regex("custom-[A-Za-z0-9_-]{1,48}")) }?.let { Protocol(it, title.take(80).ifBlank { it }, "Дополнительный режим Xray") }
             ?: Regex("^route-([A-Za-z0-9_-]{1,32})-(HY2_OBFS|HY2|AWG)$").matchEntire(name)
                 ?.let { Protocol(name, title.take(80).ifBlank { name }, "", baseName = it.groupValues[2], routeId = it.groupValues[1]) }
     }
@@ -53,17 +54,24 @@ class Profile(val json: JSONObject) {
     val protocols: List<Protocol> get() {
         val directTitle = str("serverTitle").ifBlank { "Напрямую" }
         val direct = directProtocols.map { if (json.has("routes")) it.copy(title = "${it.title} · $directTitle") else it }
-        val routes = json.optJSONArray("routes") ?: return direct
+        val routes = json.optJSONArray("routes") ?: org.json.JSONArray()
         return direct + (0 until routes.length()).flatMap { i ->
             val route = routes.getJSONObject(i)
             val id = route.getString("id")
             Profile(route.getJSONObject("profile")).directProtocols.map {
                 it.copy(name = "route-$id-${it.name}", title = "${it.title} · ${route.getString("title")}", routeId = id)
             }
-        }
+        } + ExtraXray.parse(json.optJSONArray("extraXray"))
     }
 
     fun connectionProfile(protocol: Protocol): Profile {
+        if (protocol.customOutbound != null) {
+            val settings = JSONObject(protocol.customOutbound).getJSONObject("settings")
+            val endpoint = settings.optString("address").ifBlank {
+                (settings.optJSONArray("vnext") ?: settings.optJSONArray("servers"))?.optJSONObject(0)?.optString("address").orEmpty()
+            }
+            return Profile(JSONObject(json.toString()).put("host", endpoint.ifBlank { host }))
+        }
         val id = protocol.routeId ?: return this
         val routes = json.getJSONArray("routes")
         return (0 until routes.length()).map { routes.getJSONObject(it) }

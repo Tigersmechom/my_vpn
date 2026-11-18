@@ -50,7 +50,7 @@ object VpnController {
     private val backend by lazy { GoBackend(app, NoopTunnelActionHandler()) }
     private var wgUp = false
 
-    private var xrayState = XrayVpnService.STATE_DOWN
+    @Volatile private var xrayState = XrayVpnService.STATE_DOWN
     private var xrayDown: CompletableDeferred<Unit>? = null
 
     private val tunnel = object : Tunnel {
@@ -104,7 +104,10 @@ object VpnController {
         AvailabilityProcess.stopAll()
         scope.launch {
             mutex.withLock {
-                stopAll()
+                // The Xray service serializes replacement itself. Stopping the service
+                // here races its pending destruction against the next start request.
+                val replacingXray = protocol.usesXray && xrayState != XrayVpnService.STATE_DOWN && !wgUp
+                if (!replacingXray) stopAll()
                 val endpoint = profile.connectionProfile(protocol)
                 _status.value = VpnStatus(VpnState.CONNECTING, protocol, host = endpoint.host)
                 if (protocol.usesXray) {

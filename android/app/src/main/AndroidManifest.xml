@@ -27,6 +27,12 @@
             </intent-filter>
         </activity>
 
+        <service
+            android:name=".XrayProbeService"
+            android:exported="false"
+            android:stopWithTask="true"
+            android:process=":xray_probe" />
+
         <!-- Xray живёт в отдельном процессе: в одном процессе с AmneziaWG оказались бы два Go-рантайма. -->
         <service
             android:name=".XrayVpnService"

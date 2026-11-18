@@ -246,7 +246,7 @@ object ExtraXray {
             }
             validateNode(outbound, 0)
             validateSettings(protocol, outbound.getJSONObject("settings"))
-            Protocol(id, title, "Дополнительный режим Xray · $protocol", outbound.toString())
+            Protocol(id, title, if (protocol == "vless" && outbound.optJSONObject("streamSettings")?.optString("security") == "reality") "VLESS + REALITY · TCP" else "Дополнительный режим Xray · $protocol", outbound.toString())
         }
     }
 

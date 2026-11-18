@@ -146,6 +146,7 @@ private fun HomeScreen(store: Store, foreground: Boolean, onSettings: () -> Unit
         val process = AvailabilityProcess(context.applicationContext)
         health = process
         availability = emptyMap()
+        availabilityMessage = null
         try {
             coroutineScope {
                 launch {
@@ -171,9 +172,22 @@ private fun HomeScreen(store: Store, foreground: Boolean, onSettings: () -> Unit
                         val snapshot = profile
                         try {
                             val values = process.check(snapshot)
-                            if (snapshot.toString() == profile.toString()) { availability = values; availabilityMessage = null }
+                            if (snapshot.toString() == profile.toString()) { availability = availability + values; availabilityMessage = null }
                         } catch (e: CancellationException) { throw e }
                         catch (e: Exception) { availabilityMessage = e.message }
+                        delay(maxOf(100L, 5_000 - (android.os.SystemClock.elapsedRealtime() - start)))
+                    }
+                }
+                launch {
+                    while (isActive) {
+                        val start = android.os.SystemClock.elapsedRealtime()
+                        val snapshot = profile
+                        try {
+                            process.checkExtra(snapshot) { id, result ->
+                                if (snapshot.toString() == profile.toString()) availability = availability + (id to result)
+                            }
+                        } catch (e: CancellationException) { throw e }
+                        catch (_: Exception) { /* Preserve independent HY2/AWG checks if a TCP probe fails. */ }
                         delay(maxOf(100L, 5_000 - (android.os.SystemClock.elapsedRealtime() - start)))
                     }
                 }
@@ -217,7 +231,7 @@ private fun HomeScreen(store: Store, foreground: Boolean, onSettings: () -> Unit
             }
 
             item { SectionTitle("Протокол") }
-            item { Text(availabilityMessage ?: "В открытом приложении без VPN: проверка каждые 5 с. Задержка HTTPS, не скорость загрузки.", style = MaterialTheme.typography.bodySmall) }
+            item { Text(if (status.state != VpnState.DOWN) "Автопроверки приостановлены на время VPN." else availabilityMessage ?: "В открытом приложении без VPN: проверка каждые 5 с. Задержка HTTPS, не скорость загрузки.", style = MaterialTheme.typography.bodySmall) }
             items(profile.protocols, key = { it.name }) { p ->
                 ProtocolRow(p, selected = p.name == protocol.name, availability = availability[p.name]?.takeIf { active && System.currentTimeMillis() - it.checkedAt < 15_000 }, paused = !active) {
                     if (p == protocol) return@ProtocolRow
@@ -278,7 +292,7 @@ private fun HomeScreen(store: Store, foreground: Boolean, onSettings: () -> Unit
                             }
                             Text("Внешний IP: ${last.exitIp}", style = MaterialTheme.typography.bodySmall)
                         } else {
-                            Text("Подключитесь и запустите тест, чтобы сравнить протоколы.", style = MaterialTheme.typography.bodyMedium)
+                            Text(if (status.state == VpnState.UP) "Запустите тест, чтобы сравнить протоколы." else "Подключитесь и запустите тест, чтобы сравнить протоколы.", style = MaterialTheme.typography.bodyMedium)
                         }
                         testError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
                         Button(

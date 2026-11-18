@@ -56,16 +56,16 @@ class XrayVpnService : VpnService() {
                 val profile = Profile.parse(intent.getStringExtra(EXTRA_PROFILE)!!)
                 val proto = Protocol.restored(intent.getStringExtra(EXTRA_PROTOCOL), profile)
                 goForeground(proto)
-                worker.execute { start(profile, proto) }
+                worker.execute { start(profile, proto, startId) }
             }
-            ACTION_STOP -> worker.execute { stop(null) }
+            ACTION_STOP -> worker.execute { stop(null, startId) }
             // Запуск системой (always-on VPN) не поддерживаем: нет выбранного профиля.
             else -> stopSelf()
         }
         return START_NOT_STICKY
     }
 
-    private fun start(profile: Profile, proto: Protocol) {
+    private fun start(profile: Profile, proto: Protocol, startId: Int) {
         shutdownCore()
         protocol = proto
         activeHost = profile.connectionProfile(proto).host
@@ -80,7 +80,9 @@ class XrayVpnService : VpnService() {
                 .addRoute("0.0.0.0", 0)
                 .addDisallowedApplication(packageName)
             // IPv6-адрес не добавляем: тогда Android блокирует IPv6 целиком и он не утекает мимо туннеля.
-            profile.connectionProfile(proto).dnsServers.forEach { runCatching { builder.addDnsServer(it) } }
+            // DNS is answered inside Xray and carried as HTTPS through the selected proxy.
+            // A synthetic resolver avoids opportunistic DoT to the previous physical network.
+            builder.addDnsServer(XrayConfig.TUN_DNS)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) builder.setMetered(false)
 
             val fd = builder.establish() ?: error("Нет разрешения на VPN")
@@ -94,16 +96,18 @@ class XrayVpnService : VpnService() {
             goForeground(proto, started = true)
         } catch (e: Throwable) {
             Log.e(TAG, "Xray start failed: ${e.javaClass.simpleName}")
-            stop("Не удалось запустить VPN. Проверьте профиль и разрешение VPN.")
+            stop("Не удалось запустить VPN. Проверьте профиль и разрешение VPN.", startId)
         }
     }
 
-    private fun stop(reason: String?) {
+    private fun stop(reason: String?, startId: Int? = null) {
         shutdownCore()
         error = reason
         setState(STATE_DOWN)
-        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
-        stopSelf()
+        if (startId == null || stopSelfResult(startId)) {
+            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+            if (startId == null) stopSelf()
+        }
     }
 
     private fun shutdownCore() {

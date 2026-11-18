@@ -8,8 +8,8 @@ plugins {
 }
 
 // Ядро Xray для Android (gomobile-сборка AndroidLibXrayLite). 60 МБ — в git не храним, качаем при первой сборке.
-val xrayLibVersion = "v26.9.30"
-val xrayLibSha256 = "cf71680b776b9ca583747ba652f816b047a655eab875d8951e6141636d88bbd6"
+val xrayLibVersion = "v26.11.9"
+val xrayLibSha256 = "cdfef146218233a31a8b52c8b1016557730d3b63fc121d4c84cacea50e669155"
 val xrayAar = file("libs/libv2ray-$xrayLibVersion.aar")
 
 fun sha256(f: File): String =
@@ -46,8 +46,8 @@ android {
         applicationId = "app.myvpn"
         minSdk = 24
         targetSdk = 35
-        versionCode = 5
-        versionName = "1.4.0"
+        versionCode = 6
+        versionName = "1.4.1"
     }
 
     splits {

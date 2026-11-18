@@ -99,10 +99,53 @@ class ProfileUpdateTest {
         })) }
     }
 
-    @Test fun retiredExtraProtocolsAreNotOfferedAfterUpdate() {
+    @Test fun authenticatedExtraProtocolsAppearWithoutReplacingBuiltins() {
         val update = decode(envelope(profile().put("extraXray", JSONArray().put(extra()))))
-        assertEquals(listOf("HY2", "HY2_OBFS", "AWG"), update.profile.protocols.map { it.name })
-        assertEquals(Protocol.HY2, Protocol.restored("custom-trojan", update.profile))
+        assertEquals(listOf("HY2", "HY2_OBFS", "AWG", "custom-trojan"), update.profile.protocols.map { it.name })
+        assertEquals("custom-trojan", Protocol.restored("custom-trojan", update.profile).name)
+    }
+
+    @Test fun extraTcpModeRetainsEndpointAndOutboundAcrossRefreshAndStatusRestore() {
+        val tcp = JSONObject().put("id", "custom-ru-es-tcp").put("title", "Россия → Испания · резерв TCP")
+            .put("outbound", JSONObject().put("protocol", "vless")
+                .put("settings", JSONObject().put("address", "192.0.2.88").put("port", 443)
+                    .put("id", "00000000-0000-4000-8000-000000000001").put("encryption", "none").put("flow", "xtls-rprx-vision-udp443"))
+                .put("streamSettings", JSONObject().put("network", "raw").put("security", "reality")
+                    .put("realitySettings", JSONObject().put("serverName", "example.org").put("fingerprint", "chrome")
+                        .put("publicKey", "A".repeat(43)).put("shortId", "0123456789abcdef"))))
+        val p = decode(envelope(profile().put("extraXray", JSONArray().put(tcp)))).profile
+        val mode = p.protocols.last()
+        assertEquals("custom-ru-es-tcp", Protocol.restored(mode.name, Profile.parse(p.toString())).name)
+        assertTrue(mode.usesXray)
+        assertEquals("192.0.2.88", p.connectionProfile(mode).host)
+        val outbound = JSONObject(XrayConfig.build(p, mode, 10808)).getJSONArray("outbounds").getJSONObject(0)
+        assertEquals("vless", outbound.getString("protocol"))
+        assertEquals("192.0.2.88", outbound.getJSONObject("settings").getString("address"))
+        assertEquals("raw", outbound.getJSONObject("streamSettings").getString("network"))
+        assertEquals("reality", outbound.getJSONObject("streamSettings").getString("security"))
+        assertEquals(1200, outbound.getJSONObject("streamSettings").getJSONObject("sockopt").getInt("tcpMaxSeg"))
+        assertTrue(Protocol.history(mode.name, mode.title)!!.usesXray)
+    }
+
+    @Test fun signedBundleUpgradeWorksOfflineWithoutErasingHistoryOrSelection() {
+        val preferences = MemoryPreferences()
+        val oldProfile = Profile.parse(profile().toString())
+        val oldStore = Store(preferences, { oldProfile }, { null })
+        oldStore.applyUpdate(ProfileUpdate(6, oldProfile))
+        oldStore.protocol = Protocol.AWG
+        oldStore.addResult(SpeedResult(Protocol.AWG, 1, 12, 34.0, 10.0, "192.0.2.1"))
+        val bundled = Profile.parse(profile().put("host", "192.0.2.88").put("extraXray", JSONArray().put(extra())).toString())
+        val floor = UpdateBootstrap("android", "https://example.org/update.json", key, 7)
+        val migrated = Store(preferences, { bundled }, { floor })
+        assertEquals(7, migrated.appliedRevision)
+        assertEquals("192.0.2.88", migrated.profile.host)
+        assertEquals("custom-trojan", migrated.profile.protocols.last().name)
+        assertEquals(Protocol.AWG, migrated.protocol)
+        assertEquals(1, migrated.results().size)
+        migrated.applyUpdate(ProfileUpdate(8, oldProfile))
+        val relaunched = Store(preferences, { bundled }, { floor })
+        assertEquals(8, relaunched.appliedRevision)
+        assertEquals(oldProfile.host, relaunched.profile.host)
     }
 
     @Test fun rejectsUnknownProtocolsDuplicateIdsAndDangerousFields() {

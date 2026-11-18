@@ -50,6 +50,21 @@ class Store internal constructor(
 
     val appliedRevision: Int get() = prefs.getInt(KEY_REVISION, 0)
 
+    init {
+        // A signed APK carries an authenticated-by-distribution bootstrap profile.
+        // Install it once when its floor is newer, so new modes work even if the
+        // old VPN and the remote update URL are both unreachable. History and
+        // valid selections remain in their existing preference keys.
+        runCatching {
+            val boot = bootstrap
+            if (boot != null && boot.minRevision > appliedRevision) {
+                require(defaultProfile.str("client") == boot.client)
+                ProfileValidation.requireComplete(defaultProfile)
+                applyUpdate(ProfileUpdate(boot.minRevision, defaultProfile))
+            }
+        }
+    }
+
     /** Профиль и номер обновления записываем одной транзакцией, активный VPN не трогаем. */
     @Synchronized
     fun applyUpdate(update: ProfileUpdate, repair: Boolean = false): Boolean {

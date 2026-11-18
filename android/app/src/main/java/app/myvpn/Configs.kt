@@ -11,6 +11,8 @@ private val PRIVATE_NETS = listOf(
 )
 
 object XrayConfig {
+    const val TUN_DNS = "10.111.0.2"
+    private const val DNS_QUERY_TAG = "myvpn-dns"
     /**
      * Клиентский конфиг Xray: TUN-inbound (fd передаётся отдельно в startLoop),
      * локальный SOCKS для встроенного теста скорости и outbound VLESS+Reality или Hysteria2.
@@ -24,8 +26,19 @@ object XrayConfig {
             else -> protocol.customOutbound?.let { JSONObject(it) }
                 ?: error("Для этого протокола нужно обновить приложение")
         }
+        val stream = proxy.optJSONObject("streamSettings")
+        if (proxy.optString("protocol") == "vless" && stream?.optString("network") in setOf("tcp", "raw")) {
+            // Keep TCP records usable on mobile paths and through an existing outer VPN.
+            // This trusted local limit does not expose socket controls to remote profiles.
+            stream!!.put("sockopt", JSONObject().put("tcpMaxSeg", 1200))
+        }
         return JSONObject()
             .put("log", JSONObject().put("loglevel", "warning"))
+            .put("dns", JSONObject()
+                .put("servers", JSONArray().put("https://1.1.1.1/dns-query"))
+                .put("queryStrategy", "UseIPv4")
+                .put("disableFallback", true)
+                .put("tag", DNS_QUERY_TAG))
             .put(
                 "inbounds", JSONArray()
                     .put(
@@ -47,6 +60,13 @@ object XrayConfig {
             .put(
                 "outbounds", JSONArray()
                     .put(proxy.put("tag", "proxy"))
+                    .put(JSONObject().put("tag", "dns-out").put("protocol", "dns")
+                        .put("streamSettings", JSONObject().put("network", "raw").put("sockopt", JSONObject().put("dialerProxy", "proxy")))
+                        .put("settings", JSONObject().put("rewriteNetwork", "tcp").put("rewriteAddress", "1.1.1.1").put("rewritePort", 53)
+                            .put("rules", JSONArray()
+                            .put(JSONObject().put("action", "return").put("qType", 28).put("rCode", 0))
+                            .put(JSONObject().put("action", "hijack").put("qType", 1))
+                            .put(JSONObject().put("action", "direct")))))
                     .put(JSONObject().put("tag", "direct").put("protocol", "freedom"))
                     .put(JSONObject().put("tag", "block").put("protocol", "blackhole"))
             )
@@ -54,7 +74,13 @@ object XrayConfig {
                 "routing", JSONObject()
                     .put("domainStrategy", "AsIs")
                     .put(
-                        "rules", JSONArray().put(
+                        "rules", JSONArray()
+                            .put(JSONObject().put("type", "field").put("inboundTag", JSONArray().put("tun").put("socks"))
+                                .put("port", "53").put("network", "udp,tcp").put("outboundTag", "dns-out"))
+                            .put(JSONObject().put("type", "field").put("inboundTag", JSONArray().put(DNS_QUERY_TAG)).put("outboundTag", "proxy"))
+                            .put(JSONObject().put("type", "field").put("ip", JSONArray().put(TUN_DNS))
+                                .put("port", "853").put("outboundTag", "block"))
+                            .put(
                             JSONObject().put("type", "field")
                                 .put("ip", JSONArray(PRIVATE_NETS))
                                 .put("outboundTag", "direct")
