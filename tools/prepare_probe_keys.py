@@ -40,11 +40,14 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--profiles',type=Path,nargs='+',required=True)
     parser.add_argument('--ssh-key',type=Path,required=True)
+    parser.add_argument('--only-missing',action='store_true',help='Preserve existing dedicated health identities')
     args=parser.parse_args();documents={p:json.loads(p.read_text()) for p in args.profiles};plans={}
     for path,root in documents.items():
         servers=[('primary',root)]+[(s['id'],s['profile']) for s in root.get('additionalServers',[])]
         for server_id,base in servers:
             for route_id,p in [('direct',base)]+[(r['id'],r['profile']) for r in base.get('routes',[])]:
+                if args.only_missing and 'probeAwg' in p:
+                    continue
                 host=str(ipaddress.IPv4Address(p.get('exitHost',p['host'])))
                 client=p['client'];identity='\n'.join([client,server_id,route_id,p['awg']['serverPublicKey']])
                 device='probe-'+client+'-'+hashlib.sha256(identity.encode()).hexdigest()[:12]

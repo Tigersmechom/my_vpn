@@ -15,10 +15,11 @@ struct ConfigChecks {
         _ = try ProfileValidation.profile(publishedProfile.json)
         try RegionChecks.run(profile: publishedProfile)
         try RouteChecks.run(profile: publishedProfile, output: destination)
-        // Migration/state fixtures have four modes even when the live feed has additional modes.
+        // Keep migration fixtures independent of which modes the live catalog enables.
         var baseline = publishedProfile.json
         baseline.removeValue(forKey: "extraXray")
         baseline.removeValue(forKey: "routes")
+        baseline["enabledProtocols"] = ["HY2", "HY2_OBFS", "AWG"]
         let profile = Profile(json: baseline)
         precondition(Set(VPNProtocol.allCases.map(\.rawValue)) == ["VLESS_TCP", "HY2", "HY2_OBFS", "AWG"])
 

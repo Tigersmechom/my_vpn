@@ -50,6 +50,22 @@ class RouteTest {
         }
     }
 
+    @Test fun twoProtocolCatalogOffersSixRoutesWithoutDirectFinlandOrSalamander() {
+        val modes = JSONArray().put("HY2").put("AWG")
+        val catalog = base().put("host", "192.0.2.2").put("serverTitle", "Испания").put("enabledProtocols", modes)
+        val viaSpain = base().put("host", "192.0.2.2").put("exitHost", "192.0.2.1").put("enabledProtocols", modes)
+        val viaRussia = base().put("host", "192.0.2.3").put("exitHost", "192.0.2.2").put("enabledProtocols", modes)
+        catalog.put("routes", JSONArray()
+            .put(JSONObject().put("id", "es-fi").put("title", "Испания → Финляндия").put("profile", viaSpain))
+            .put(JSONObject().put("id", "ru-es").put("title", "Россия → Испания").put("profile", viaRussia)))
+        val parsed = Profile.parse(catalog.toString())
+        assertEquals(listOf("HY2", "AWG", "route-es-fi-HY2", "route-es-fi-AWG", "route-ru-es-HY2", "route-ru-es-AWG"), parsed.protocols.map { it.name })
+        assertEquals(3, parsed.protocols.count { !it.usesXray })
+        assertTrue(parsed.protocols.first().title.contains("Испания"))
+        assertFalse(parsed.protocols.any { it.title.contains("Salamander") })
+        for (mode in parsed.protocols.takeLast(2)) assertEquals("192.0.2.3", parsed.connectionProfile(mode).host)
+    }
+
     @Test fun newAndRemovedRoutesAppearFromDataInTheSameApplication() {
         val initial = Profile.parse(base().toString())
         val store = Store(MemoryPreferences(), { initial }, { null })

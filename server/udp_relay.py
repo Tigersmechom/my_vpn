@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Forward only three fixed, encrypted UDP endpoints. No VPN keys are needed here."""
+"""Forward two or three fixed, encrypted UDP endpoints. No VPN keys are needed here."""
 import argparse
 import ipaddress
 import json
@@ -20,12 +20,12 @@ def validate(config):
         address = ipaddress.ip_address(config[name])
         if address.version != 4 or not address.is_global:
             raise ValueError('relay endpoints must be public IPv4')
-    if config['listen'] == config['target'] or len(config['ports']) != 3:
-        raise ValueError('expected three remote UDP endpoints')
+    if config['listen'] == config['target'] or len(config['ports']) not in (2, 3):
+        raise ValueError('expected two or three remote UDP endpoints')
     for pair in config['ports']:
         if not isinstance(pair, list) or len(pair) != 2 or any(type(p) is not int or not 1 <= p <= 65535 for p in pair):
             raise ValueError('invalid UDP port pair')
-    if any(len({pair[i] for pair in config['ports']}) != 3 for i in [0, 1]):
+    if any(len({pair[i] for pair in config['ports']}) != len(config['ports']) for i in [0, 1]):
         raise ValueError('duplicate UDP ports')
     return config
 
@@ -72,24 +72,30 @@ def main():
     parser.add_argument('action', choices=['install', 'start', 'stop'])
     parser.add_argument('--listen')
     parser.add_argument('--target')
-    parser.add_argument('--target-ports', nargs=3, type=int)
+    parser.add_argument('--target-ports', nargs='+', type=int)
+    parser.add_argument('--listen-ports', nargs='+', type=int, help='Defaults to 10443, 10444, ...')
     args = parser.parse_args()
     if args.action == 'stop':
         stop()
         return
     if args.action == 'install':
+        outgoing = args.target_ports or []
+        incoming = args.listen_ports if args.listen_ports is not None else [10443+i for i in range(len(outgoing))]
+        if len(incoming) != len(outgoing):
+            parser.error('listen and target port counts must match')
         config = validate({'listen': args.listen, 'target': args.target,
-                           'ports': [[10443+i, p] for i, p in enumerate(args.target_ports or [])]})
+                           'ports': [list(pair) for pair in zip(incoming, outgoing)]})
         CONFIG.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         CONFIG.write_text(json.dumps(config, indent=2)+'\n')
         CONFIG.chmod(0o600)
+        Path('/etc/sysctl.d/90-myvpn-udp-relay.conf').write_text('net.ipv4.ip_forward=1\n')
         destination = Path('/usr/local/lib/myvpn/udp_relay.py')
         destination.parent.mkdir(parents=True, exist_ok=True)
         if Path(__file__).resolve() != destination:
             shutil.copyfile(__file__, destination)
         destination.chmod(0o755)
         Path('/etc/systemd/system/myvpn-udp-relay.service').write_text('''[Unit]
-Description=MyVPN fixed UDP relay to Finland
+Description=MyVPN fixed UDP relay
 Wants=network-online.target
 After=network-online.target docker.service
 
