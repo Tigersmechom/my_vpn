@@ -26,6 +26,7 @@ final class VPNManager: ObservableObject {
     private var monitorTask: Task<Void, Never>?
     private var feedTask: Task<Void, Never>?
     private var healthProcess: AvailabilityProcess?
+    private var xrayHealthProcess: XrayAvailabilityProcess?
     private var monitorGeneration = 0
     private let updateBootstrap = UpdateBootstrap.bundled
 
@@ -68,6 +69,7 @@ final class VPNManager: ObservableObject {
         monitorTask?.cancel(); monitorTask = nil
         feedTask?.cancel(); feedTask = nil
         healthProcess?.stop(); healthProcess = nil
+        xrayHealthProcess?.stop(); xrayHealthProcess = nil
     }
 
     private func reconcileMonitoring() {
@@ -77,6 +79,8 @@ final class VPNManager: ObservableObject {
         let generation = monitorGeneration
         let process = AvailabilityProcess()
         healthProcess = process
+        let xrayProcess = XrayAvailabilityProcess()
+        xrayHealthProcess = xrayProcess
         availability = [:]
         availabilityMessage = nil
         monitorTask = Task { [weak self] in
@@ -90,7 +94,9 @@ final class VPNManager: ObservableObject {
                 }
                 do {
                     let payload = try JSONSerialization.data(withJSONObject: ["routes": routes])
-                    let values = try await process.check(payload)
+                    async let transportValues = process.check(payload)
+                    async let xrayValues = xrayProcess.check(catalog.connections.filter { $0.builtin == nil })
+                    let values = try await transportValues + xrayValues
                     guard !Task.isCancelled, self.monitorGeneration == generation, self.state == .down else { return }
                     guard catalog.serialized() == self.store.selectedServer.profile.serialized() else { continue }
                     self.availability = Dictionary(uniqueKeysWithValues: values.map { ($0.id, $0) })

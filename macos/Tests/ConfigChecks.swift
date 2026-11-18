@@ -116,16 +116,24 @@ struct ConfigChecks {
             }
         }
         let extras = publishedProfile.connections.filter { $0.builtin == nil }
-        precondition(extras.isEmpty)
+        precondition(extras.count == ((publishedProfile.json["extraXray"] as? [[String: Any]]) ?? []).count)
         for connection in publishedProfile.connections {
             let endpoint = publishedProfile.connectionProfile(connection)
             if connection.usesXray {
                 let config = Configs.xray(publishedProfile, connection)
                 let object = try JSONSerialization.jsonObject(with: Data(config.utf8)) as! [String: Any]
                 let proxy = (object["outbounds"] as! [[String: Any]])[0]
-                precondition((proxy["settings"] as! [String: Any])["address"] as? String == endpoint.host)
-                let stream = proxy["streamSettings"] as! [String: Any]
-                precondition((stream["tlsSettings"] as! [String: Any])["pinnedPeerCertSha256"] as? String == endpoint.str("hy2.pinSha256"))
+                if connection.builtin == nil {
+                    var expected = connection.outbound!
+                    expected["tag"] = "proxy"
+                    let encode: ([String: Any]) throws -> Data = { try JSONSerialization.data(withJSONObject: $0, options: [.sortedKeys]) }
+                    let actualData = try encode(proxy), expectedData = try encode(expected)
+                    precondition(actualData == expectedData)
+                } else {
+                    precondition((proxy["settings"] as! [String: Any])["address"] as? String == endpoint.host)
+                    let stream = proxy["streamSettings"] as! [String: Any]
+                    precondition((stream["tlsSettings"] as! [String: Any])["pinnedPeerCertSha256"] as? String == endpoint.str("hy2.pinSha256"))
+                }
                 let file = destination.appendingPathComponent("published-\(connection.id).json")
                 try config.write(to: file, atomically: true, encoding: .utf8)
                 try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)

@@ -209,9 +209,22 @@ extension Profile {
                   let raw = entry["profile"] as? [String: Any] else { return [] }
             return Profile(json: raw).availableProtocols.map { VPNConnection($0, routeID: id, routeTitle: title) }
         }
+            + ((json["extraXray"] as? [[String: Any]]) ?? []).compactMap { entry in
+                guard let id = entry["id"] as? String, let title = entry["title"] as? String,
+                      let outbound = entry["outbound"] as? [String: Any] else { return nil }
+                return VPNConnection(id: id, title: title, outbound: outbound)
+            }
     }
 
     func connectionProfile(_ connection: VPNConnection) -> Profile {
+        if let settings = connection.outbound?["settings"] as? [String: Any] {
+            let server = ((settings["servers"] ?? settings["vnext"]) as? [[String: Any]])?.first
+            if let address = (settings["address"] ?? server?["address"]) as? String {
+                var endpoint = json
+                endpoint["host"] = address
+                return Profile(json: endpoint)
+            }
+        }
         guard let id = connection.routeID,
               let entry = (json["routes"] as? [[String: Any]])?.first(where: { $0["id"] as? String == id }),
               let raw = entry["profile"] as? [String: Any] else { return self }

@@ -37,8 +37,32 @@ class RelayTests(unittest.TestCase):
         self.assertEqual([r[r.index('--to-destination')+1] for _, c, r in rules if c == 'MYVPN_RELAY_IN'], ['1.1.1.1:443', '1.1.1.1:54970'])
 
     def test_rejects_local_destinations_duplicates_and_boolean_ports(self):
-        for field,value in [('target','127.0.0.1'),('target','8.8.8.8'),('listen','::1'),('ports',[[10443,443]]),
+        for field,value in [('target','127.0.0.1'),('target','8.8.8.8'),('target','224.0.0.1'),('listen','224.0.0.1'),('listen','::1'),('ports',[[10443,443]]),
                             ('ports',[[True,443],[10444,29426],[10445,53685]]),
                             ('ports',[[10443,443],[10443,29426],[10445,53685]])]:
             config=self.sample();config[field]=value
             with self.assertRaises(ValueError): relay.validate(config)
+
+    def test_cloud_nat_matches_private_destination_and_preserves_target_guards(self):
+        config = self.sample()
+        config['localAddress'] = '10.130.0.30'
+        config['ports'] = [[443, 443], [8443, 54970]]
+        rules = list(relay.rules(config))
+        for _, chain, rule in rules:
+            self.assertNotIn(config['listen'], rule)
+            if chain == 'MYVPN_RELAY_IN':
+                self.assertEqual(rule[rule.index('-d') + 1], '10.130.0.30')
+                self.assertTrue(rule[rule.index('--to-destination') + 1].startswith('1.1.1.1:'))
+            else:
+                self.assertEqual(rule[rule.index('--ctorigdst') + 1], '10.130.0.30')
+                self.assertIn('--ctorigdstport', rule)
+                self.assertIn('1.1.1.1', rule)
+            if chain == 'MYVPN_RELAY_OUT':
+                self.assertEqual(rule[rule.index('--to-source') + 1], '10.130.0.30')
+
+    def test_cloud_nat_rejects_non_unicast_and_unexpected_local_addresses(self):
+        for address in ['127.0.0.1', '0.0.0.0', '169.254.169.254', '224.0.0.1', '::1', '1.1.1.1']:
+            config = self.sample()
+            config['localAddress'] = address
+            with self.subTest(address=address), self.assertRaises(ValueError):
+                relay.validate(config)

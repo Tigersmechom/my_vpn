@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import SwiftUI
+import Darwin
 
 struct AvailabilityResult: Decodable {
     let id: String
@@ -91,6 +92,125 @@ final class AvailabilityProcess: @unchecked Sendable {
         let decoded = try JSONDecoder().decode(Reply.self, from: reply)
         guard decoded.error == nil, let results = decoded.results else { throw VPNError("Не удалось проверить конфигурацию") }
         return results
+    }
+    deinit { stop() }
+}
+
+/// Check catalog TCP modes through loopback SOCKS, without the privileged helper or TUN.
+final class XrayAvailabilityProcess: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stopped = false
+    private var children: [Process] = []
+    private var history: [String: [Int?]] = [:]
+    private var fingerprints: [String: Data] = [:]
+    private let executable: URL?
+    private let requestExecutable: URL
+
+    init(executable: URL? = Bundle.main.url(forResource: "xray", withExtension: nil),
+         requestExecutable: URL = URL(fileURLWithPath: "/usr/bin/curl")) {
+        self.executable = executable
+        self.requestExecutable = requestExecutable
+    }
+
+    func stop() {
+        lock.lock()
+        stopped = true
+        let running = children
+        lock.unlock()
+        for child in running where child.isRunning { child.terminate() }
+    }
+
+    private func launch(_ child: Process) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !stopped else { throw CancellationError() }
+        try child.run()
+        children.append(child)
+    }
+
+    private func finish(_ child: Process) {
+        if child.isRunning { child.terminate() }
+        child.waitUntilExit()
+        lock.lock()
+        children.removeAll { $0 === child }
+        lock.unlock()
+    }
+
+    func check(_ connections: [VPNConnection]) async throws -> [AvailabilityResult] {
+        try await withTaskCancellationHandler(operation: {
+            try await Task.detached(priority: .utility) {
+                try connections.map { try self.probe($0) }
+            }.value
+        }, onCancel: { self.stop() })
+    }
+
+    private func port() throws -> Int {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { throw VPNError("Не удалось открыть проверку") }
+        defer { Darwin.close(fd) }
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        var size = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let bound = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.bind(fd, $0, size) }
+        }
+        guard bound == 0 else { throw VPNError("Не удалось открыть проверку") }
+        let named = withUnsafeMutablePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &size) }
+        }
+        guard named == 0 else { throw VPNError("Не удалось открыть проверку") }
+        return Int(UInt16(bigEndian: address.sin_port))
+    }
+
+    private func probe(_ connection: VPNConnection) throws -> AvailabilityResult {
+        guard let outbound = connection.outbound, let executable else {
+            throw VPNError("Не найден компонент проверки TCP")
+        }
+        let fingerprint = try JSONSerialization.data(withJSONObject: outbound, options: [.sortedKeys])
+        if fingerprints[connection.id] != fingerprint { history[connection.id] = []; fingerprints[connection.id] = fingerprint }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("myvpn-tcp-probe-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let port = try port()
+        let config: [String: Any] = ["log": ["loglevel": "none"],
+            "inbounds": [["listen": "127.0.0.1", "port": port, "protocol": "socks", "settings": ["auth": "noauth", "udp": false]]],
+            "outbounds": [outbound]]
+        let file = directory.appendingPathComponent("config.json")
+        try JSONSerialization.data(withJSONObject: config).write(to: file)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        let core = Process()
+        core.executableURL = executable
+        core.arguments = ["run", "-c", file.path]
+        core.standardOutput = FileHandle.nullDevice; core.standardError = FileHandle.nullDevice
+        core.environment = ProcessInfo.processInfo.environment.merging(["GOMAXPROCS": "2"]) { _, new in new }
+        try launch(core)
+        defer { finish(core) }
+        Thread.sleep(forTimeInterval: 0.15)
+        let request = Process(), output = Pipe()
+        request.executableURL = requestExecutable
+        request.arguments = ["--silent", "--head", "--max-time", "7", "--socks5-hostname", "127.0.0.1:\(port)",
+                             "--output", "/dev/null", "--write-out", "%{http_code} %{time_total}", "https://www.google.com/generate_204"]
+        request.standardOutput = output; request.standardError = FileHandle.nullDevice
+        try launch(request)
+        defer { finish(request) }
+        request.waitUntilExit()
+        lock.lock(); let cancelled = stopped; lock.unlock()
+        guard !cancelled else { throw CancellationError() }
+        let response = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).split(separator: " ")
+        let success = request.terminationStatus == 0 && response.first == "204"
+        let ms = Int((response.count == 2 ? Double(response[1]) ?? 0 : 0) * 1000)
+        let samples = Array(((history[connection.id] ?? []) + [success ? ms : nil]).suffix(5))
+        history[connection.id] = samples
+        let good = samples.compactMap { $0 }
+        let failedTwice = samples.count >= 2 && samples.suffix(2).allSatisfy { $0 == nil }
+        let grade = failedTwice ? "red" : (success && ms < 250 && good.count == samples.count ? "green" : "yellow")
+        return AvailabilityResult(id: connection.id, grade: grade,
+            code: success ? "ok" : (request.terminationStatus == 28 ? "timeout" : "unreachable"),
+            rttMs: ms, averageMs: good.isEmpty ? 0 : good.reduce(0, +) / good.count,
+            jitterMs: (good.max() ?? 0) - (good.min() ?? 0), samples: samples.count, successes: good.count,
+            checkedAt: Date().timeIntervalSince1970 * 1000)
     }
     deinit { stop() }
 }

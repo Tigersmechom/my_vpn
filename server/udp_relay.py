@@ -14,14 +14,22 @@ CHAINS = [('nat', 'PREROUTING', 'MYVPN_RELAY_IN'),
 
 
 def validate(config):
-    if set(config) != {'listen', 'target', 'ports'}:
+    required = {'listen', 'target', 'ports'}
+    if not required <= set(config) or set(config) - required - {'localAddress'}:
         raise ValueError('invalid relay configuration')
     for name in ['listen', 'target']:
         address = ipaddress.ip_address(config[name])
-        if address.version != 4 or not address.is_global:
+        if address.version != 4 or not address.is_global or address.is_multicast:
             raise ValueError('relay endpoints must be public IPv4')
     if config['listen'] == config['target'] or len(config['ports']) not in (2, 3):
         raise ValueError('expected two or three remote UDP endpoints')
+    if 'localAddress' in config:
+        address = ipaddress.ip_address(config['localAddress'])
+        private_ranges = ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')
+        if (address.version != 4 or address.is_multicast or not (address.is_global or any(
+                address in ipaddress.ip_network(network) for network in private_ranges))
+                or config['localAddress'] == config['target']):
+            raise ValueError('local relay address must be public or RFC1918 IPv4')
     for pair in config['ports']:
         if not isinstance(pair, list) or len(pair) != 2 or any(type(p) is not int or not 1 <= p <= 65535 for p in pair):
             raise ValueError('invalid UDP port pair')
@@ -32,7 +40,9 @@ def validate(config):
 
 def rules(config):
     validate(config)
-    listen, target = config['listen'], config['target']
+    # One-to-one cloud NAT delivers packets to the VM's private interface address.
+    # Conntrack and SNAT must use that address, rather than its public mapping.
+    listen, target = config.get('localAddress', config['listen']), config['target']
     for incoming, outgoing in config['ports']:
         original = ['-m', 'conntrack', '--ctdir', 'ORIGINAL', '--ctorigdst', listen, '--ctorigdstport', str(incoming)]
         reply = ['-m', 'conntrack', '--ctdir', 'REPLY', '--ctorigdst', listen, '--ctorigdstport', str(incoming)]
@@ -71,6 +81,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['install', 'start', 'stop'])
     parser.add_argument('--listen')
+    parser.add_argument('--local-address', help='Interface IPv4 when the public listen address is mapped by cloud NAT')
     parser.add_argument('--target')
     parser.add_argument('--target-ports', nargs='+', type=int)
     parser.add_argument('--listen-ports', nargs='+', type=int, help='Defaults to 10443, 10444, ...')
@@ -83,8 +94,11 @@ def main():
         incoming = args.listen_ports if args.listen_ports is not None else [10443+i for i in range(len(outgoing))]
         if len(incoming) != len(outgoing):
             parser.error('listen and target port counts must match')
-        config = validate({'listen': args.listen, 'target': args.target,
-                           'ports': [list(pair) for pair in zip(incoming, outgoing)]})
+        config = {'listen': args.listen, 'target': args.target,
+                  'ports': [list(pair) for pair in zip(incoming, outgoing)]}
+        if args.local_address is not None:
+            config['localAddress'] = args.local_address
+        validate(config)
         CONFIG.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         CONFIG.write_text(json.dumps(config, indent=2)+'\n')
         CONFIG.chmod(0o600)

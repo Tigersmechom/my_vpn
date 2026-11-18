@@ -26,6 +26,15 @@ with tempfile.TemporaryDirectory(prefix="myvpn-config-check-") as directory:
         "-o", str(temporary / "check"),
     ], check=True)
     subprocess.run([str(temporary / "check"), str(profile), directory, str(root.parent)], check=True)
+    subprocess.run([
+        "swiftc", "-target", "arm64-apple-macosx13.0",
+        str(root / "Sources/MyVPN/Profile.swift"),
+        str(root / "Sources/MyVPN/ProfileValidation.swift"),
+        str(root / "Sources/MyVPN/Availability.swift"),
+        str(root / "Tests/AvailabilityChecks.swift"),
+        "-o", str(temporary / "availability-check"),
+    ], check=True)
+    subprocess.run([str(temporary / "availability-check")], check=True)
     for config in sorted(temporary.glob("*.json")):
         protocol = config.stem
         # Match the helper's system-plist extraction and its TUN wrapper.
