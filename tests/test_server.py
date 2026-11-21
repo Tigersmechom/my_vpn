@@ -204,6 +204,27 @@ class ServerIntegrationTests(unittest.TestCase):
         self.assertNotIn("# linux", self.awg_config.read_text())
         self.assertFalse(any(c[0] == "systemctl" and "restart" in c for c in self.calls()))
 
+    def test_plain_hysteria_only_server_keeps_salamander_disabled_after_render(self):
+        self.server.update(ENABLE_VLESS="0", ENABLE_HY2_OBFS="0")
+        self.write_env(self.state / "server.env", self.server)
+        self.make_client("mac")
+        self.run_ctl("render")
+        self.assertEqual([entry["tag"] for entry in json.loads(self.xray_config.read_text())["inbounds"]], ["hysteria2"])
+        self.assertEqual(self.profile("mac")["enabledProtocols"], ["HY2", "AWG"])
+        self.run_ctl("add-awg-device", "probe-mac", "mac", extra_env={"MYVPN_TEST_AWG_ACTIVE": "1"})
+        self.run_ctl("render")
+        self.assertEqual([entry["tag"] for entry in json.loads(self.xray_config.read_text())["inbounds"]], ["hysteria2"])
+        self.assertEqual(self.profile("probe-mac")["enabledProtocols"], ["HY2", "AWG"])
+
+    def test_invalid_salamander_toggle_does_not_replace_running_configuration(self):
+        self.make_client("mac")
+        self.run_ctl("render")
+        previous = self.xray_config.read_bytes()
+        self.server["ENABLE_HY2_OBFS"] = "2"
+        self.write_env(self.state / "server.env", self.server)
+        self.run_ctl("render", ok=False)
+        self.assertEqual(self.xray_config.read_bytes(), previous)
+
     def test_awg_device_failure_preserves_existing_configuration(self):
         self.make_client("mac")
         self.run_ctl("render")

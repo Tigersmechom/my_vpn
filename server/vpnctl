@@ -46,7 +46,7 @@ safe_source() {
   python3 - "$1" "$2" <<'PY' || exit 1
 import os, re, stat, sys
 path, kind = sys.argv[1:]
-server = "PUBLIC_HOST WAN_IF REALITY_SNI REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY REALITY_SHORT_ID REALITY_FINGERPRINT VLESS_TCP_PORT ENABLE_VLESS AWG_PORT AWG_NET AWG_SERVER_PRIVATE_KEY AWG_SERVER_PUBLIC_KEY AWG_JC AWG_JMIN AWG_JMAX AWG_S1 AWG_S2 AWG_S3 AWG_S4 AWG_H1 AWG_H2 AWG_H3 AWG_H4 AWG_I1 CLIENT_DNS HY2_PORT HY2_OBFS_PORT HY2_SNI HY2_OBFS_PASSWORD HY2_CERT HY2_KEY HY2_PIN VLESS_XHTTP_PORT XHTTP_PATH WG_PORT WG_NET WG_SERVER_PRIVATE_KEY WG_SERVER_PUBLIC_KEY RELAY_HOST".split()
+server = "PUBLIC_HOST WAN_IF REALITY_SNI REALITY_PRIVATE_KEY REALITY_PUBLIC_KEY REALITY_SHORT_ID REALITY_FINGERPRINT VLESS_TCP_PORT ENABLE_VLESS ENABLE_HY2_OBFS AWG_PORT AWG_NET AWG_SERVER_PRIVATE_KEY AWG_SERVER_PUBLIC_KEY AWG_JC AWG_JMIN AWG_JMAX AWG_S1 AWG_S2 AWG_S3 AWG_S4 AWG_H1 AWG_H2 AWG_H3 AWG_H4 AWG_I1 CLIENT_DNS HY2_PORT HY2_OBFS_PORT HY2_SNI HY2_OBFS_PASSWORD HY2_CERT HY2_KEY HY2_PIN VLESS_XHTTP_PORT XHTTP_PATH WG_PORT WG_NET WG_SERVER_PRIVATE_KEY WG_SERVER_PUBLIC_KEY RELAY_HOST".split()
 client = "CLIENT_NAME CLIENT_INDEX VLESS_UUID AWG_PRIVATE_KEY AWG_PUBLIC_KEY AWG_PRESHARED_KEY HY2_AUTH WG_PRIVATE_KEY WG_PUBLIC_KEY WG_PRESHARED_KEY".split()
 allowed = set(server if kind == "server" else client)
 try:
@@ -83,6 +83,7 @@ client_file() {
 
 validate_server() {
   [[ ${ENABLE_VLESS:-1} == 0 || ${ENABLE_VLESS:-1} == 1 ]] || die "неверное ENABLE_VLESS"
+  [[ ${ENABLE_HY2_OBFS:-1} == 0 || ${ENABLE_HY2_OBFS:-1} == 1 ]] || die "неверное ENABLE_HY2_OBFS"
   python3 - "$PUBLIC_HOST" "$REALITY_SNI" "$HY2_SNI" "$WAN_IF" "$AWG_NET" "$CLIENT_DNS" \
     "$VLESS_TCP_PORT" "$AWG_PORT" "$HY2_PORT" "$HY2_OBFS_PORT" <<'PY' || exit 1
 import ipaddress, re, sys
@@ -281,6 +282,7 @@ render_xray() {
   jq -n \
     --argjson tcpPort "$VLESS_TCP_PORT" --argjson reality "$reality" \
     --argjson enableVless "${ENABLE_VLESS:-1}" \
+    --argjson enableObfs "${ENABLE_HY2_OBFS:-1}" \
     --argjson visionClients "$vision_clients" --argjson hyClients "$hy_clients" \
     --argjson hyPort "$HY2_PORT" --argjson hyObfsPort "$HY2_OBFS_PORT" \
     --arg hyCert "$HY2_CERT" --arg hyKey "$HY2_KEY" --arg obfs "$HY2_OBFS_PASSWORD" '
@@ -308,7 +310,7 @@ render_xray() {
                          finalmask: {udp: [{type: "salamander", settings: {password: $obfs}}]}},
         sniffing: {enabled: true, destOverride: ["http", "tls", "quic"], routeOnly: true}
       }
-    ] | map(select(.tag != "vless-tcp" or $enableVless == 1))),
+    ] | map(select((.tag != "vless-tcp" or $enableVless == 1) and (.tag != "hysteria2-obfs" or $enableObfs == 1)))),
     outbounds: [{tag: "direct", protocol: "freedom"}, {tag: "block", protocol: "blackhole"}],
     routing: {domainStrategy: "AsIs", rules: [
       {type: "field", ip: ["geoip:private"], outboundTag: "block"},
@@ -396,6 +398,7 @@ cmd_profile() {
     --arg uuid "$VLESS_UUID" --arg sni "$REALITY_SNI" --arg pbk "$REALITY_PUBLIC_KEY" \
     --arg sid "$REALITY_SHORT_ID" --arg fp "$REALITY_FINGERPRINT" --argjson tcpPort "$VLESS_TCP_PORT" \
     --argjson enableVless "${ENABLE_VLESS:-1}" \
+    --argjson enableObfs "${ENABLE_HY2_OBFS:-1}" \
     --argjson awgPort "$AWG_PORT" --arg awgPriv "$AWG_PRIVATE_KEY" --arg awgAddr "$AWG_NET.$CLIENT_INDEX/32" \
     --arg awgSrv "$AWG_SERVER_PUBLIC_KEY" --arg awgPsk "$AWG_PRESHARED_KEY" \
     --argjson jc "$AWG_JC" --argjson jmin "$AWG_JMIN" --argjson jmax "$AWG_JMAX" \
@@ -411,7 +414,8 @@ cmd_profile() {
           jc: $jc, jmin: $jmin, jmax: $jmax, s1: $s1, s2: $s2, s3: $s3, s4: $s4,
           h1: $h1, h2: $h2, h3: $h3, h4: $h4, i1: $i1},
     hy2: {port: $hyPort, obfsPort: $hyObfsPort, auth: $hyAuth, sni: $hySni, pinSha256: $hyPin, obfsPassword: $hyObfs}
-  } + (if $enableVless == 0 then {enabledProtocols: ["HY2", "HY2_OBFS", "AWG"]} else {} end)'
+  } + (if $enableVless == 0 or $enableObfs == 0 then {enabledProtocols:
+    ([if $enableVless == 1 then "VLESS_TCP" else empty end, "HY2", if $enableObfs == 1 then "HY2_OBFS" else empty end, "AWG"])} else {} end)'
 }
 
 urlencode() { jq -rn --arg s "$1" '$s | @uri'; }
